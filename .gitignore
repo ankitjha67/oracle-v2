@@ -1,31 +1,72 @@
-# Data (auto-downloaded on first run)
+# ── Data (auto-downloaded on first run) ──
 cricsheet_data/
 football_data/
 .cache/
 
-# Output
+# ── Output files ──
 ORACLE_UNIFIED_OUTPUT.json
 MULTI_SPORT*.json
 LIVE_PREDICTIONS.json
+FOOTBALL_PREDICTIONS.json
 upcoming_fixtures.json
+final_prediction.json
+backtest_results.json
+monte_carlo.json
+complete_player_database.json
+aggregated_match_data.json
 oracle.db
 
-# Environment
+# ── Environment / Secrets ──
 .env
 *.env
+!.env.example
 
-# Python
+# ── Python ──
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
 *.egg-info/
+*.egg
 dist/
 build/
+.eggs/
+*.whl
 
-# IDE
+# ── Virtual environments ──
+venv/
+.venv/
+env/
+ENV/
+
+# ── Testing ──
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# ── Type checking ──
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ── IDE ──
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
+.project
+.settings/
 
-# OS
+# ── OS ──
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# ── Ruff ──
+.ruff_cache/
+
+# ── Docker ──
+.dockerignore

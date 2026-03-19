@@ -14,28 +14,45 @@ Usage:
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 0: AUTO-INSTALL DEPENDENCIES
 # ═══════════════════════════════════════════════════════════════════════
-import subprocess, sys, os, importlib
+import subprocess, sys, os, importlib, logging
+
+logger = logging.getLogger("oracle.run")
+
 
 def ensure_deps():
-    REQ={"numpy":"numpy","pandas":"pandas","sklearn":"scikit-learn","scipy":"scipy","requests":"requests"}
-    OPT={"xgboost":"xgboost","lightgbm":"lightgbm","glicko2":"glicko2","trueskill":"trueskill"}
+    REQ = {"numpy": "numpy", "pandas": "pandas", "sklearn": "scikit-learn", "scipy": "scipy", "requests": "requests"}
+    OPT = {"xgboost": "xgboost", "lightgbm": "lightgbm", "glicko2": "glicko2", "trueskill": "trueskill"}
+
     def _pip(pkg):
-        for ex in [["--break-system-packages"],[]]:
-            try: subprocess.check_call([sys.executable,"-m","pip","install",pkg,"--quiet"]+ex,
-                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); return True
-            except: continue
+        for ex in [["--break-system-packages"], []]:
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", pkg, "--quiet"] + ex,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except subprocess.CalledProcessError:
+                continue
         return False
-    for imp,pip in REQ.items():
-        try: importlib.import_module(imp)
+
+    for imp, pip in REQ.items():
+        try:
+            importlib.import_module(imp)
         except ImportError:
-            print(f"  📦 Installing {pip}...")
-            if not _pip(pip): print(f"  ❌ {pip} failed"); sys.exit(1)
-    for imp,pip in OPT.items():
-        try: importlib.import_module(imp)
+            logger.info("Installing %s...", pip)
+            if not _pip(pip):
+                logger.error("%s failed to install", pip)
+                sys.exit(1)
+    for imp, pip in OPT.items():
+        try:
+            importlib.import_module(imp)
         except ImportError:
-            if _pip(pip): print(f"  ✅ {pip}")
-            else: print(f"  ⚠️ {pip} skipped")
-    print("  ✅ Dependencies ready\n")
+            if _pip(pip):
+                logger.info("Installed optional: %s", pip)
+            else:
+                logger.warning("Optional package %s skipped", pip)
+    logger.info("Dependencies ready")
 
 print("╔"+"═"*78+"╗")
 print("║  ORACLE V2 FINAL — Universal Sports Prediction Engine                        ║")
@@ -48,7 +65,7 @@ ensure_deps()
 # ═══════════════════════════════════════════════════════════════════════
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import json, time, warnings, argparse, zipfile
+import json, logging, time, warnings, argparse, zipfile
 from pathlib import Path
 from datetime import datetime
 from dataclasses import asdict
@@ -106,7 +123,8 @@ def setup_data(cricket=True, football=True):
                 try:
                     r=requests.get(f"https://www.football-data.co.uk/mmz4281/{s}/{c}.csv",timeout=30)
                     if r.status_code==200 and len(r.content)>100: fp.write_bytes(r.content)
-                except: pass
+                except Exception:
+                    pass
             print(f"    ✅ {sum(1 for c in LG for s in SS if (FOOTBALL_DIR/f'{c}_{s}.csv').exists())}/{len(LG)*len(SS)} CSVs")
         else: print(f"  ✅ Football: {len(LG)*len(SS)} CSVs")
 
@@ -185,7 +203,8 @@ def run_cricket(R):
     for m in CRICKET_RESULTS: m["sport"]="cricket"; db.insert_match(m)
     for m in scored:
         l=m["team_b"] if m["winner"]==m["team_a"] else m["team_a"]
-        ratings.update_all(m["winner"],l,"cricket",float(m.get("margin_numeric",0)))
+        ratings.update_all(m["winner"],l,"cricket",float(m.get("margin_numeric",0)),
+                           stage=m.get("stage","group"))
     teams=set(m["team_a"] for m in CRICKET_RESULTS)|set(m["team_b"] for m in CRICKET_RESULTS)
     cr={}
     for t in sorted(teams):
@@ -356,7 +375,8 @@ def run_football(R):
             from all_apis import NewsInjuryAPI
             news=NewsInjuryAPI.get_sports_news("football injury Premier League")
             if news: R["injury_news"]=news[:5]; print(f"    ✅ {len(news)} injury/news articles")
-        except: pass
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════
 # MULTI-SPORT
@@ -389,11 +409,29 @@ def run(cricket=True, football=True, multi=True):
         "seconds":round(elapsed,1),"python":sys.version.split()[0],"platform":sys.platform,
         "api_keys":{"odds_api":bool(ODDS_API_KEY),"football_data":bool(FOOTBALL_DATA_KEY),"newsdata":bool(NEWSDATA_KEY)}}
 
-    # AUDIT
+    # BIAS AUDIT
     print("\n"+"═"*80); print("  📋 FEATURE AUDIT"); print("═"*80)
     for _,s in sorted(R["_audit"].items()): print(f"  {s}")
     wk=sum(1 for s in R["_audit"].values() if "✅" in s); tot=len(R["_audit"])
     print(f"\n  Score: {wk}/{tot} ({'🟢 ALL GO' if wk==tot else '🟡 PARTIAL'})")
+
+    # Run BiasAuditor on stored predictions
+    from core import BiasAuditor
+    try:
+        db_path = OUTPUT_DIR / "oracle.db"
+        if db_path.exists():
+            from core import OracleDB as _DB
+            _db = _DB(str(db_path))
+            conn = _db._get_conn()
+            rows = conn.execute("SELECT * FROM predictions WHERE is_correct >= 0").fetchall()
+            if rows:
+                preds = [dict(r) for r in rows]
+                bias = BiasAuditor.audit(preds)
+                R["bias_audit"] = bias
+                print(f"\n  📊 Bias Audit: {bias.get('overall_accuracy',0):.1%} accuracy, "
+                      f"{bias.get('favorite_bias',{}).get('assessment','N/A')} favorite bias")
+    except Exception:
+        pass
 
     # GAMBLING DISCLAIMER
     print(GAMBLING_DISCLAIMER)

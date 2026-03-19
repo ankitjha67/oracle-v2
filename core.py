@@ -3,7 +3,6 @@ Oracle V2 — Core Infrastructure Layer
 Database, Rate Limiting, Advanced Ratings, Calibration, Backtesting, Monte Carlo
 """
 from __future__ import annotations
-import os
 import sqlite3, json, time, math, hashlib, threading, logging, os
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
@@ -235,10 +234,33 @@ class OracleDB:
         recent = matches[:5]
         recent_a = sum(1 for m in recent if m["winner"] == team_a)
         recent_b = sum(1 for m in recent if m["winner"] == team_b)
+
+        # Trend detection: compare recent form vs all-time
+        h2h_trend = 0.0
+        if len(matches) >= 5:
+            all_time_rate = a_wins / len(matches) if matches else 0.5
+            recent_rate = recent_a / len(recent) if recent else 0.5
+            h2h_trend = recent_rate - all_time_rate  # positive = A improving
+
+        # Streak detection: consecutive wins by same team
+        streak_team = None
+        streak_len = 0
+        for m in matches:
+            if streak_team is None:
+                streak_team = m["winner"]
+                streak_len = 1
+            elif m["winner"] == streak_team:
+                streak_len += 1
+            else:
+                break
+
         return {
             "total": len(matches), "a_wins": a_wins, "b_wins": b_wins,
             "draws": draws, "recent_5_a": recent_a, "recent_5_b": recent_b,
             "last_match": matches[0] if matches else None,
+            "h2h_trend": round(h2h_trend, 3),
+            "streak_team": streak_team, "streak_len": streak_len,
+            "recent_win_rate_a": recent_a / len(recent) if recent else 0.5,
         }
 
     # ── Predictions ──
@@ -493,11 +515,23 @@ class RatingEngine:
     def __init__(self, db: OracleDB):
         self.db = db
 
+    # Stage-dependent K-factor: knockouts matter more than group stage
+    STAGE_K_FACTORS = {
+        "group": 20, "league": 20, "super_8": 24, "super8": 24,
+        "quarter_final": 28, "quarter": 28,
+        "semi_final": 32, "semi": 32,
+        "final": 40, "dead_rubber": 12,
+    }
+
     def elo_update(self, winner: str, loser: str, sport: str,
-                   K: float = 32, margin: float = 0) -> tuple[float, float]:
+                   K: float = 32, margin: float = 0,
+                   stage: str = "") -> tuple[float, float]:
         w = self.db.get_rating(winner, sport, "elo")
         l = self.db.get_rating(loser, sport, "elo")
         expected = 1.0 / (1.0 + 10 ** ((l["rating"] - w["rating"]) / 400))
+        # Dynamic K-factor based on match importance
+        if stage:
+            K = self.STAGE_K_FACTORS.get(stage.lower().replace(" ", "_"), K)
         # MOV adjustment
         mov_mult = 1.0
         if margin > 0:
@@ -564,10 +598,10 @@ class RatingEngine:
         return new_w, new_l
 
     def update_all(self, winner: str, loser: str, sport: str,
-                   margin: float = 0, surface: str = ""):
+                   margin: float = 0, surface: str = "", stage: str = ""):
         """Update all rating systems at once."""
         stage_K = 32
-        self.elo_update(winner, loser, sport, stage_K, margin)
+        self.elo_update(winner, loser, sport, stage_K, margin, stage=stage)
         self.glicko2_update(winner, loser, sport)
         self.trueskill_update(winner, loser, sport)
         if surface:
