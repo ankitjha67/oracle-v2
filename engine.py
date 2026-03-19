@@ -319,8 +319,31 @@ def extract_features(match: dict, db: OracleDB = None, weather: dict = None) -> 
         weights = [math.exp(-0.15 * i) for i in range(len(results))]
         return sum(w * r for w, r in zip(weights, results)) / sum(weights) if weights else 0.5
 
+    def form_velocity(results):
+        """Compute slope of recent results — positive = improving."""
+        if len(results) < 3:
+            return 0.0
+        n = len(results)
+        x = list(range(n))
+        x_mean = sum(x) / n
+        y_mean = sum(results) / n
+        num = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, results))
+        den = sum((xi - x_mean) ** 2 for xi in x)
+        return num / den if den > 0 else 0.0
+
+    def form_volatility(results):
+        """Std dev of recent results — high = inconsistent."""
+        if len(results) < 2:
+            return 0.0
+        mean = sum(results) / len(results)
+        return math.sqrt(sum((r - mean) ** 2 for r in results) / len(results))
+
     fa = form_score(form_a)
     fb = form_score(form_b)
+    vel_a = form_velocity(form_a)
+    vel_b = form_velocity(form_b)
+    vol_a = form_volatility(form_a)
+    vol_b = form_volatility(form_b)
 
     # --- Venue ---
     vd = get_venue_data(venue)
@@ -377,7 +400,7 @@ def extract_features(match: dict, db: OracleDB = None, weather: dict = None) -> 
     is_day_night = float(match.get("is_day_night", False))
     is_neutral = float(match.get("is_neutral", False))
 
-    # ═══ Build feature vector (50 features) ═══
+    # ═══ Build feature vector (56 features) ═══
     features = np.array([
         # Rating systems (4)
         elo_diff, elo_prob, glicko_diff,
@@ -402,6 +425,11 @@ def extract_features(match: dict, db: OracleDB = None, weather: dict = None) -> 
 
         # Form (3)
         fa, fb, fa - fb,
+
+        # Form velocity & volatility (4) — NEW
+        vel_a, vel_b,             # momentum direction
+        vel_a - vel_b,            # relative momentum
+        vol_a - vol_b,            # consistency difference
 
         # Momentum (1)
         momentum_diff,
@@ -428,10 +456,12 @@ def extract_features(match: dict, db: OracleDB = None, weather: dict = None) -> 
         elo_a / 2200, elo_b / 2200,
         pa["avg_impact"] / 100, pb["avg_impact"] / 100,
 
-        # Interaction features (3)
+        # Interaction features (5) — expanded
         dew_risk * is_day_night,  # dew only matters at night
         home_adv * pressure,      # home advantage amplified in knockouts
         elo_prob * odds_prob_a,   # elo-market agreement
+        vel_a * pressure,         # momentum amplified in knockouts
+        fa * (1 - vol_a),         # form weighted by consistency
     ])
 
     return features
@@ -445,6 +475,7 @@ FEATURE_NAMES = [
     "top_impact_diff", "weakest_impact_diff", "impact_a_abs",
     "h2h_advantage", "h2h_centered",
     "form_a", "form_b", "form_diff",
+    "form_velocity_a", "form_velocity_b", "velocity_diff", "volatility_diff",
     "momentum_diff",
     "venue_bat_first", "venue_avg_norm", "venue_spin", "venue_pace",
     "venue_boundary", "venue_altitude", "dew_risk",
@@ -455,6 +486,7 @@ FEATURE_NAMES = [
     "injury_diff", "rest_diff",
     "elo_a_norm", "elo_b_norm", "impact_a_norm", "impact_b_norm",
     "dew_x_night", "home_x_pressure", "elo_x_odds",
+    "momentum_x_pressure", "form_x_consistency",
 ]
 
 
@@ -519,6 +551,7 @@ class OracleV2:
         self.calibrator = ProbabilityCalibrator()
         self.scaler = StandardScaler()
         self.models: dict[str, Any] = {}
+        self.meta_learner = None
         self.is_trained = False
         self.training_stats = {}
 
@@ -579,6 +612,33 @@ class OracleV2:
             except Exception as e:
                 logger.warning(f"Super ensemble failed: {e}")
 
+        # Stacking meta-learner: train a LogisticRegression on base model outputs
+        self.meta_learner = None
+        if len(X_scaled) >= 10:
+            meta_features = []
+            for xi in X_scaled:
+                row = []
+                for m in self.models.values():
+                    if hasattr(m, "predict_proba"):
+                        try:
+                            p = m.predict_proba(xi.reshape(1, -1))[0]
+                            row.append(p[1] if len(p) > 1 else p[0])
+                        except Exception:
+                            row.append(0.5)
+                meta_features.append(row)
+            if meta_features and len(meta_features[0]) >= 2:
+                meta_X = np.array(meta_features)
+                # Replace NaN/Inf with 0.5 (neutral probability)
+                meta_X = np.nan_to_num(meta_X, nan=0.5, posinf=0.5, neginf=0.5)
+                try:
+                    self.meta_learner = LogisticRegression(max_iter=2000, random_state=42)
+                    self.meta_learner.fit(meta_X, y)
+                    meta_cv = cross_val_score(self.meta_learner, meta_X, y,
+                                              cv=min(5, len(y)), scoring="accuracy")
+                    cv_scores["StackedMeta"] = round(meta_cv.mean(), 3)
+                except Exception as e:
+                    logger.warning(f"Meta-learner failed: {e}")
+
         # Calibration
         all_probs = []
         for xi, yi in zip(X_scaled, y):
@@ -600,6 +660,7 @@ class OracleV2:
         self.training_stats = {
             "matches": len(X), "features": X.shape[1],
             "models": len(self.models), "cv_scores": cv_scores,
+            "has_meta_learner": self.meta_learner is not None,
         }
         return self.training_stats
 
@@ -639,14 +700,28 @@ class OracleV2:
             except Exception:
                 continue
 
+        # Use stacking meta-learner if available, else average
         raw_prob_a = np.mean(probs_a) if probs_a else 0.5
+        if self.meta_learner is not None and len(probs_a) >= 2:
+            try:
+                meta_input = np.array(probs_a).reshape(1, -1)
+                meta_prob = self.meta_learner.predict_proba(meta_input)[0]
+                raw_prob_a = meta_prob[1] if len(meta_prob) > 1 else meta_prob[0]
+            except Exception:
+                pass  # fallback to ensemble average
         calibrated_prob_a = self.calibrator.calibrate(raw_prob_a)
         prob_b = 1 - calibrated_prob_a
 
+        # Model disagreement: high std dev = models disagree = lower confidence
+        model_std = float(np.std(probs_a)) if len(probs_a) >= 2 else 0.0
+        disagreement_penalty = min(model_std / 0.3, 1.0)  # 0-1 scale
+
         winner = match["team_a"] if calibrated_prob_a > 0.5 else match["team_b"]
         diff = abs(calibrated_prob_a - 0.5) * 2
-        confidence = ("VERY HIGH" if diff > 0.45 else "HIGH" if diff > 0.30 else
-                      "MODERATE" if diff > 0.15 else "LOW" if diff > 0.05 else "TOSS-UP")
+        # Penalize confidence when models disagree significantly
+        effective_diff = diff * (1 - disagreement_penalty * 0.4)
+        confidence = ("VERY HIGH" if effective_diff > 0.45 else "HIGH" if effective_diff > 0.30 else
+                      "MODERATE" if effective_diff > 0.15 else "LOW" if effective_diff > 0.05 else "TOSS-UP")
 
         # Feature importance
         feat_imp = {}
@@ -669,6 +744,11 @@ class OracleV2:
             "calibrated_prob_b": round(prob_b * 100, 1),
             "predicted_winner": winner,
             "confidence": confidence,
+            "model_agreement": {
+                "std_dev": round(model_std, 4),
+                "disagreement_pct": round(disagreement_penalty * 100, 1),
+                "consensus": "STRONG" if model_std < 0.08 else "MODERATE" if model_std < 0.15 else "WEAK",
+            },
             "model_votes": model_votes,
             "models_for_a": sum(1 for v in model_votes.values()
                                 if v["winner"] == match["team_a"]),

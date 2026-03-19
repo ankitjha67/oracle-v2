@@ -69,7 +69,7 @@ class TestFeatureExtraction:
         }
         features = extract_features(match)
         assert len(features) == len(FEATURE_NAMES)
-        assert len(features) == 50
+        assert len(features) == 56
 
     def test_features_are_numeric(self):
         match = {
@@ -83,9 +83,11 @@ class TestFeatureExtraction:
         assert all(np.isfinite(features))
 
     def test_feature_names_match(self):
-        assert len(FEATURE_NAMES) == 50
+        assert len(FEATURE_NAMES) == 56
         assert "elo_diff" in FEATURE_NAMES
         assert "home_advantage" in FEATURE_NAMES
+        assert "form_velocity_a" in FEATURE_NAMES
+        assert "momentum_x_pressure" in FEATURE_NAMES
 
 
 class TestBuildModels:

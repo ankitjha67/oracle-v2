@@ -203,7 +203,8 @@ def run_cricket(R):
     for m in CRICKET_RESULTS: m["sport"]="cricket"; db.insert_match(m)
     for m in scored:
         l=m["team_b"] if m["winner"]==m["team_a"] else m["team_a"]
-        ratings.update_all(m["winner"],l,"cricket",float(m.get("margin_numeric",0)))
+        ratings.update_all(m["winner"],l,"cricket",float(m.get("margin_numeric",0)),
+                           stage=m.get("stage","group"))
     teams=set(m["team_a"] for m in CRICKET_RESULTS)|set(m["team_b"] for m in CRICKET_RESULTS)
     cr={}
     for t in sorted(teams):
@@ -408,11 +409,29 @@ def run(cricket=True, football=True, multi=True):
         "seconds":round(elapsed,1),"python":sys.version.split()[0],"platform":sys.platform,
         "api_keys":{"odds_api":bool(ODDS_API_KEY),"football_data":bool(FOOTBALL_DATA_KEY),"newsdata":bool(NEWSDATA_KEY)}}
 
-    # AUDIT
+    # BIAS AUDIT
     print("\n"+"═"*80); print("  📋 FEATURE AUDIT"); print("═"*80)
     for _,s in sorted(R["_audit"].items()): print(f"  {s}")
     wk=sum(1 for s in R["_audit"].values() if "✅" in s); tot=len(R["_audit"])
     print(f"\n  Score: {wk}/{tot} ({'🟢 ALL GO' if wk==tot else '🟡 PARTIAL'})")
+
+    # Run BiasAuditor on stored predictions
+    from core import BiasAuditor
+    try:
+        db_path = OUTPUT_DIR / "oracle.db"
+        if db_path.exists():
+            from core import OracleDB as _DB
+            _db = _DB(str(db_path))
+            conn = _db._get_conn()
+            rows = conn.execute("SELECT * FROM predictions WHERE is_correct >= 0").fetchall()
+            if rows:
+                preds = [dict(r) for r in rows]
+                bias = BiasAuditor.audit(preds)
+                R["bias_audit"] = bias
+                print(f"\n  📊 Bias Audit: {bias.get('overall_accuracy',0):.1%} accuracy, "
+                      f"{bias.get('favorite_bias',{}).get('assessment','N/A')} favorite bias")
+    except Exception:
+        pass
 
     # GAMBLING DISCLAIMER
     print(GAMBLING_DISCLAIMER)

@@ -38,8 +38,12 @@ ratings = [
     "glicko2>=2.0.0",
     "trueskill>=0.4.5",
 ]
+api = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
 all = [
-    "oracle-v2[ml,ratings]",
+    "oracle-v2[ml,ratings,api]",
 ]
 dev = [
     "oracle-v2[all]",
