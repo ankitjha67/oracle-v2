@@ -1,0 +1,31 @@
+# Data (auto-downloaded on first run)
+cricsheet_data/
+football_data/
+.cache/
+
+# Output
+ORACLE_UNIFIED_OUTPUT.json
+MULTI_SPORT*.json
+LIVE_PREDICTIONS.json
+upcoming_fixtures.json
+oracle.db
+
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
