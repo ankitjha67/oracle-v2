@@ -1,26 +1,52 @@
 """
 Oracle V2 — Multi-Sport Engine (REWRITTEN)
-NBA, NHL, MLB, NFL, UFC (fighters), F1 (drivers), Tennis (players)
+NBA, NHL, MLB, NFL, UFC (fighters), F1 (drivers), Tennis (players),
+WNBA, College Football, College Basketball, Rugby, AFL, MLS, and more.
 All data from ESPN free API + OpenF1. Zero hardcoded matches.
 """
 
-import json, os, time, math, requests
+import json, os, time, math, requests, logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+
+logger = logging.getLogger("oracle.multi_sport")
 
 CACHE_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 ESPN = "https://site.api.espn.com/apis/site/v2/sports"
 
+# ═══════════════════════════════════════════════════════════════════════
+# SPORT REGISTRY — All ESPN-backed sports with Elo parameters
+# ═══════════════════════════════════════════════════════════════════════
 SPORTS = {
-    "NBA":  {"espn":"basketball/nba",  "K":25,"home":55,"type":"team"},
-    "NHL":  {"espn":"hockey/nhl",      "K":20,"home":30,"type":"team"},
-    "MLB":  {"espn":"baseball/mlb",    "K":20,"home":25,"type":"team"},
-    "NFL":  {"espn":"football/nfl",    "K":30,"home":50,"type":"team"},
-    "UFC":  {"espn":"mma/ufc",         "K":40,"home":0, "type":"fighter"},
-    "ATP":  {"espn":"tennis/atp",      "K":32,"home":0, "type":"player"},
-    "WTA":  {"espn":"tennis/wta",      "K":32,"home":0, "type":"player"},
+    # --- Major US leagues ---
+    "NBA":      {"espn": "basketball/nba",              "K": 25, "home": 55, "type": "team"},
+    "NHL":      {"espn": "hockey/nhl",                  "K": 20, "home": 30, "type": "team"},
+    "MLB":      {"espn": "baseball/mlb",                "K": 20, "home": 25, "type": "team"},
+    "NFL":      {"espn": "football/nfl",                "K": 30, "home": 50, "type": "team"},
+    "MLS":      {"espn": "soccer/usa.1",                "K": 22, "home": 45, "type": "team"},
+    "WNBA":     {"espn": "basketball/wnba",             "K": 25, "home": 30, "type": "team"},
+
+    # --- US College ---
+    "NCAAF":    {"espn": "football/college-football",   "K": 28, "home": 55, "type": "team"},
+    "NCAAM":    {"espn": "basketball/mens-college-basketball",  "K": 28, "home": 45, "type": "team"},
+    "NCAAW":    {"espn": "basketball/womens-college-basketball","K": 28, "home": 40, "type": "team"},
+
+    # --- Combat / Individual ---
+    "UFC":      {"espn": "mma/ufc",                     "K": 40, "home": 0,  "type": "fighter"},
+    "ATP":      {"espn": "tennis/atp",                  "K": 32, "home": 0,  "type": "player"},
+    "WTA":      {"espn": "tennis/wta",                  "K": 32, "home": 0,  "type": "player"},
+
+    # --- International ---
+    "RUGBY":    {"espn": "rugby",                       "K": 30, "home": 40, "type": "team"},
+    "RUGBY_L":  {"espn": "rugby-league",                "K": 30, "home": 38, "type": "team"},
+    "AFL":      {"espn": "australian-football",          "K": 32, "home": 60, "type": "team"},
+    "FIELD_HOCKEY": {"espn": "field-hockey",             "K": 28, "home": 35, "type": "team"},
+
+    # --- Other ---
+    "GOLF":     {"espn": "golf",                         "K": 30, "home": 0,  "type": "player"},
+    "LACROSSE": {"espn": "lacrosse",                     "K": 25, "home": 50, "type": "team"},
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -227,32 +253,70 @@ def build_f1():
 # ═══════════════════════════════════════════════════════════════════════
 # MAIN ENTRY
 # ═══════════════════════════════════════════════════════════════════════
+def get_active_sports(month=None):
+    """Return sport keys that are currently in-season."""
+    if month is None:
+        month = datetime.now().month
+    active = []
+    # Year-round
+    active += ["UFC", "F1"]
+    # Season-based
+    if month in (10, 11, 12, 1, 2, 3, 4, 5, 6):
+        active += ["NBA", "NHL", "WNBA"]
+    if month in (3, 4, 5, 6, 7, 8, 9, 10):
+        active.append("MLB")
+    if month in (9, 10, 11, 12, 1, 2):
+        active += ["NFL", "NCAAF"]
+    if month in (11, 12, 1, 2, 3):
+        active += ["NCAAM", "NCAAW"]
+    # Year-round international
+    active += ["RUGBY", "AFL"]
+    # Soccer year-round
+    active.append("MLS")
+    return active
+
+
 def run_all_sports(sport_keys=None, days_back=30, days_ahead=7):
     if sport_keys is None:
-        month=datetime.now().month
-        sport_keys=[]
-        if month in (10,11,12,1,2,3,4,5,6): sport_keys+=["NBA","NHL"]
-        if month in (3,4,5,6,7,8,9,10): sport_keys.append("MLB")
-        if month in (9,10,11,12,1,2): sport_keys.append("NFL")
-        sport_keys+=["UFC","F1"]
+        sport_keys = get_active_sports()
 
     # Sport-specific lookback (more history = better Elo convergence)
-    LOOKBACK = {"NBA":60,"NHL":60,"MLB":45,"NFL":90,"UFC":90}
+    LOOKBACK = {
+        "NBA": 60, "NHL": 60, "MLB": 45, "NFL": 90, "UFC": 90,
+        "WNBA": 45, "NCAAF": 90, "NCAAM": 60, "NCAAW": 60,
+        "RUGBY": 60, "AFL": 60, "MLS": 45,
+        "RUGBY_L": 60, "FIELD_HOCKEY": 60, "LACROSSE": 45,
+    }
+
+    ICONS = {
+        "NBA": "🏀", "NHL": "🏒", "MLB": "⚾", "NFL": "🏈",
+        "UFC": "🥊", "F1": "🏎️", "ATP": "🎾", "WTA": "🎾",
+        "WNBA": "🏀", "NCAAF": "🏈", "NCAAM": "🏀", "NCAAW": "🏀",
+        "RUGBY": "🏉", "RUGBY_L": "🏉", "AFL": "🏉",
+        "MLS": "⚽", "GOLF": "⛳", "LACROSSE": "🥍",
+        "FIELD_HOCKEY": "🏑",
+    }
 
     all_results={}; total=0
     for sport in sport_keys:
-        icons={"NBA":"🏀","NHL":"🏒","MLB":"⚾","NFL":"🏈","UFC":"🥊","F1":"🏎️","ATP":"🎾","WTA":"🎾"}
-        print(f"\n  {icons.get(sport,'🏅')} {sport}")
+        if sport not in SPORTS:
+            logger.warning(f"Unknown sport: {sport}")
+            continue
+        print(f"\n  {ICONS.get(sport,'🏅')} {sport}")
 
-        if sport in ("NBA","NHL","MLB","NFL"):
-            lb = LOOKBACK.get(sport, days_back)
-            result=build_team_sport(sport,lb,days_ahead)
-        elif sport=="UFC":
-            result=build_ufc(days_back=LOOKBACK.get("UFC",90),days_ahead=14)
-        elif sport=="F1":
-            result=build_f1()
+        cfg = SPORTS[sport]
+        lb = LOOKBACK.get(sport, days_back)
+
+        if sport == "UFC":
+            result = build_ufc(days_back=lb, days_ahead=14)
+        elif sport == "F1":
+            result = build_f1()
+        elif cfg["type"] == "team":
+            result = build_team_sport(sport, lb, days_ahead)
         else:
-            result=build_team_sport(sport,days_back,days_ahead)
+            # Individual sports (ATP, WTA, GOLF) use team sport pipeline
+            # with home_adv=0 (no home court for individuals)
+            result = build_team_sport(sport, lb, days_ahead)
 
         all_results[sport]=result
         n=len(result.get("predictions",[])); total+=n

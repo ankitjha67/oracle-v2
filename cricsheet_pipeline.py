@@ -13,6 +13,103 @@ DATA_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / "cricsheet_data"
 OUTPUT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# ═══════════════════════════════════════════════════════════════════════
+# DOMESTIC T20 LEAGUE SUPPORT
+# CricSheet provides ball-by-ball data for IPL, BBL, CPL, PSL, and more.
+# ═══════════════════════════════════════════════════════════════════════
+
+DOMESTIC_LEAGUES = {
+    "ipl": {
+        "name": "Indian Premier League",
+        "zip_url": "https://cricsheet.org/downloads/ipl_male_csv2.zip",
+        "event_filter": "Indian Premier League",
+        "country": "India",
+    },
+    "bbl": {
+        "name": "Big Bash League",
+        "zip_url": "https://cricsheet.org/downloads/bbl_male_csv2.zip",
+        "event_filter": "Big Bash League",
+        "country": "Australia",
+    },
+    "cpl": {
+        "name": "Caribbean Premier League",
+        "zip_url": "https://cricsheet.org/downloads/cpl_male_csv2.zip",
+        "event_filter": "Caribbean Premier League",
+        "country": "West Indies",
+    },
+    "psl": {
+        "name": "Pakistan Super League",
+        "zip_url": "https://cricsheet.org/downloads/psl_male_csv2.zip",
+        "event_filter": "Pakistan Super League",
+        "country": "Pakistan",
+    },
+    "the_hundred": {
+        "name": "The Hundred",
+        "zip_url": "https://cricsheet.org/downloads/the_hundred_male_csv2.zip",
+        "event_filter": "The Hundred",
+        "country": "England",
+    },
+    "sa20": {
+        "name": "SA20",
+        "zip_url": "https://cricsheet.org/downloads/sa20_male_csv2.zip",
+        "event_filter": "SA20",
+        "country": "South Africa",
+    },
+}
+
+
+def download_league_data(league_key: str, data_dir: str = None) -> str:
+    """Download CricSheet data for a specific domestic T20 league.
+
+    Returns the directory path where data was extracted.
+    """
+    import requests
+    import zipfile
+
+    if league_key not in DOMESTIC_LEAGUES:
+        print(f"  Unknown league: {league_key}. Available: {list(DOMESTIC_LEAGUES.keys())}")
+        return ""
+
+    league = DOMESTIC_LEAGUES[league_key]
+    if data_dir is None:
+        data_dir = str(Path(os.path.dirname(os.path.abspath(__file__))) / f"cricsheet_{league_key}")
+
+    league_dir = Path(data_dir)
+    if league_dir.exists() and len(list(league_dir.glob("*_info.csv"))) > 10:
+        print(f"  ✅ {league['name']}: {len(list(league_dir.glob('*_info.csv')))} matches cached")
+        return str(league_dir)
+
+    print(f"  📥 Downloading {league['name']} data from CricSheet...")
+    league_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        r = requests.get(league["zip_url"], timeout=120)
+        zip_path = league_dir.parent / f"cricsheet_{league_key}_temp.zip"
+        zip_path.write_bytes(r.content)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(league_dir)
+        zip_path.unlink()
+        n_matches = len(list(league_dir.glob("*_info.csv")))
+        print(f"    ✅ {n_matches} {league['name']} matches extracted")
+        return str(league_dir)
+    except Exception as e:
+        print(f"    ⚠️ Failed to download {league['name']}: {e}")
+        return ""
+
+
+def build_league_database(league_key: str, min_year: int = 2022) -> tuple[dict, int]:
+    """Build player database for a specific domestic T20 league.
+
+    Returns (players_dict, matches_parsed) just like build_player_database.
+    """
+    data_dir = download_league_data(league_key)
+    if not data_dir:
+        return {}, 0
+
+    # For domestic leagues, we don't filter by squads — include all players
+    return build_player_database(data_dir, min_year=min_year, target_teams=None)
+
+
 # T20 WC 2026 squads (all 8 Super 8 teams + 12 group stage teams = 20 teams)
 WC_SQUADS = {
     "India": ["Abhishek Sharma","Sanju Samson","Ishan Kishan","Suryakumar Yadav",
@@ -284,10 +381,56 @@ def build_player_database(data_dir: str, min_year: int = 2022,
     # ── Build final player database ──
     players = {}
 
-    # Process all players that appear in WC squads
     all_cricsheet_names = set(batting.keys()) | set(bowling.keys())
 
-    for team_name, squad in (target_teams or {}).items():
+    # If no target teams specified, build database for ALL players with sufficient data
+    if target_teams is None:
+        for player_name in all_cricsheet_names:
+            bat = batting.get(player_name)
+            bwl = bowling.get(player_name)
+            has_bat = bat and bat["balls"] > 30
+            has_bowl = bwl and bwl["balls"] > 30
+            if not has_bat and not has_bowl:
+                continue
+
+            p = {"name": player_name, "team": "", "cricsheet_name": player_name, "role": "unknown"}
+
+            if has_bat:
+                avg = bat["runs"] / max(bat["dismissals"], 1)
+                sr = (bat["runs"] / bat["balls"]) * 100
+                p["batting"] = {
+                    "innings": bat["innings"], "runs": bat["runs"],
+                    "balls_faced": bat["balls"], "average": round(avg, 2),
+                    "strike_rate": round(sr, 2), "matches": len(bat["matches"]),
+                    "recent_scores": bat["recent_scores"][-5:],
+                }
+            if has_bowl:
+                overs = bwl["balls"] / 6
+                econ = bwl["runs_conceded"] / overs if overs > 0 else 0
+                p["bowling"] = {
+                    "balls": bwl["balls"], "wickets": bwl["wickets"],
+                    "economy": round(econ, 2), "matches": len(bwl["matches"]),
+                }
+
+            if has_bat and has_bowl:
+                p["role"] = "allrounder"
+            elif has_bat:
+                p["role"] = "batter"
+            elif has_bowl:
+                p["role"] = "bowler"
+
+            impact = 50
+            if has_bat:
+                impact = max(impact, min(p["batting"]["strike_rate"] / 2, 45) + min(p["batting"]["average"] / 2, 30))
+            if has_bowl:
+                impact = max(impact, max(0, 40 - p["bowling"]["economy"] * 3) + min(p["bowling"]["wickets"] / 3, 25))
+            p["impact_rating"] = round(min(impact, 99), 1)
+
+            players[player_name] = p
+        return players, matches_parsed
+
+    # Process players that appear in target squads
+    for team_name, squad in target_teams.items():
         for player_name in squad:
             # Find matching CricSheet name
             cs_name = None
