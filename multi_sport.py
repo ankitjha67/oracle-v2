@@ -78,7 +78,8 @@ def _fetch(url, key, ttl=1):
             d=r.json()
             with open(cf,"w") as f: json.dump(d,f)
             return d
-    except: pass
+    except Exception:
+        pass
     return None
 
 def _parse_team_event(event):
@@ -213,7 +214,9 @@ def build_f1():
         # Get recent race results
         r2=requests.get("https://api.openf1.org/v1/position?session_key=latest&position<=10",timeout=10)
         positions=r2.json() if r2.status_code==200 else []
-    except: drivers=[]; positions=[]
+    except Exception:
+        drivers = []
+        positions = []
     
     driver_list=[{"number":d.get("driver_number"),"name":d.get("full_name","?"),
                   "team":d.get("team_name","?")} for d in drivers if d.get("full_name")]

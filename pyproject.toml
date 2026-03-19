@@ -1,0 +1,144 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oracle-v2"
+version = "3.0.0"
+description = "Universal Sports Prediction Engine — Cricket, Football, NBA, NHL, MLB, UFC, F1"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Ankit" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scikit-learn>=1.3.0",
+    "scipy>=1.11.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+ml = [
+    "xgboost>=2.0.0",
+    "lightgbm>=4.0.0",
+]
+ratings = [
+    "glicko2>=2.0.0",
+    "trueskill>=0.4.5",
+]
+all = [
+    "oracle-v2[ml,ratings]",
+]
+dev = [
+    "oracle-v2[all]",
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8",
+    "pre-commit>=3.0",
+]
+
+[project.scripts]
+oracle = "run:run"
+
+# ── Ruff (linter + formatter) ──────────────────────────────────────────────
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E741",   # ambiguous variable name (l, O, I) — used in Elo math
+    "B905",   # zip without strict= (not needed for Python 3.10)
+    "SIM108", # ternary operator — readability preference
+    "RUF001", # unicode characters in strings (emojis used intentionally)
+    "RUF002", # unicode in docstrings
+    "RUF003", # unicode in comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # allow assert in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "engine", "football_pipeline", "multi_sport", "sentiment", "all_apis", "cricsheet_pipeline", "fixture_fetcher", "env_loader"]
+
+# ── Mypy (type checking) ───────────────────────────────────────────────────
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # gradual adoption — too many untyped functions to enforce now
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["xgboost.*", "lightgbm.*", "glicko2.*", "trueskill.*", "nba_api.*"]
+ignore_missing_imports = true
+
+# ── Pytest ──────────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-x",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests that require network access",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+# ── Coverage ────────────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "tests/*",
+    "setup.py",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

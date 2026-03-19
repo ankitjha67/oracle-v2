@@ -24,17 +24,22 @@ from sklearn.model_selection import cross_val_score
 from sklearn.multiclass import OneVsRestClassifier
 
 try:
-    import xgboost as xgb; HAS_XGB = True
-except: HAS_XGB = False
+    import xgboost as xgb
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
 try:
-    import lightgbm as lgb; HAS_LGB = True
-except: HAS_LGB = False
+    import lightgbm as lgb
+    HAS_LGB = True
+except ImportError:
+    HAS_LGB = False
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger("oracle.engine")
 
 # Import core
-import sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core import (
     OracleDB, RateLimiter, RatingEngine, ProbabilityCalibrator,
     WalkForwardBacktester, MonteCarloSimulator, BiasAuditor, BacktestResult,
@@ -583,7 +588,8 @@ class OracleV2:
                     try:
                         p = m.predict_proba(xi.reshape(1, -1))[0]
                         preds.append(p[1] if len(p) > 1 else p[0])
-                    except: pass
+                    except Exception:
+                        pass
             if preds:
                 all_probs.append(np.mean(preds))
         if all_probs:
@@ -722,7 +728,8 @@ class OracleV2:
                     try:
                         p = m.predict_proba(features_scaled)[0]
                         probs.append(p[1] if len(p) > 1 else p[0])
-                    except: pass
+                    except Exception:
+                        pass
             pa = np.mean(probs) if probs else 0.5
             return pa, 1 - pa
 

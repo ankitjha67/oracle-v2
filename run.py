@@ -14,28 +14,45 @@ Usage:
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 0: AUTO-INSTALL DEPENDENCIES
 # ═══════════════════════════════════════════════════════════════════════
-import subprocess, sys, os, importlib
+import subprocess, sys, os, importlib, logging
+
+logger = logging.getLogger("oracle.run")
+
 
 def ensure_deps():
-    REQ={"numpy":"numpy","pandas":"pandas","sklearn":"scikit-learn","scipy":"scipy","requests":"requests"}
-    OPT={"xgboost":"xgboost","lightgbm":"lightgbm","glicko2":"glicko2","trueskill":"trueskill"}
+    REQ = {"numpy": "numpy", "pandas": "pandas", "sklearn": "scikit-learn", "scipy": "scipy", "requests": "requests"}
+    OPT = {"xgboost": "xgboost", "lightgbm": "lightgbm", "glicko2": "glicko2", "trueskill": "trueskill"}
+
     def _pip(pkg):
-        for ex in [["--break-system-packages"],[]]:
-            try: subprocess.check_call([sys.executable,"-m","pip","install",pkg,"--quiet"]+ex,
-                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); return True
-            except: continue
+        for ex in [["--break-system-packages"], []]:
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", pkg, "--quiet"] + ex,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except subprocess.CalledProcessError:
+                continue
         return False
-    for imp,pip in REQ.items():
-        try: importlib.import_module(imp)
+
+    for imp, pip in REQ.items():
+        try:
+            importlib.import_module(imp)
         except ImportError:
-            print(f"  📦 Installing {pip}...")
-            if not _pip(pip): print(f"  ❌ {pip} failed"); sys.exit(1)
-    for imp,pip in OPT.items():
-        try: importlib.import_module(imp)
+            logger.info("Installing %s...", pip)
+            if not _pip(pip):
+                logger.error("%s failed to install", pip)
+                sys.exit(1)
+    for imp, pip in OPT.items():
+        try:
+            importlib.import_module(imp)
         except ImportError:
-            if _pip(pip): print(f"  ✅ {pip}")
-            else: print(f"  ⚠️ {pip} skipped")
-    print("  ✅ Dependencies ready\n")
+            if _pip(pip):
+                logger.info("Installed optional: %s", pip)
+            else:
+                logger.warning("Optional package %s skipped", pip)
+    logger.info("Dependencies ready")
 
 print("╔"+"═"*78+"╗")
 print("║  ORACLE V2 FINAL — Universal Sports Prediction Engine                        ║")
@@ -48,7 +65,7 @@ ensure_deps()
 # ═══════════════════════════════════════════════════════════════════════
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import json, time, warnings, argparse, zipfile
+import json, logging, time, warnings, argparse, zipfile
 from pathlib import Path
 from datetime import datetime
 from dataclasses import asdict
@@ -106,7 +123,8 @@ def setup_data(cricket=True, football=True):
                 try:
                     r=requests.get(f"https://www.football-data.co.uk/mmz4281/{s}/{c}.csv",timeout=30)
                     if r.status_code==200 and len(r.content)>100: fp.write_bytes(r.content)
-                except: pass
+                except Exception:
+                    pass
             print(f"    ✅ {sum(1 for c in LG for s in SS if (FOOTBALL_DIR/f'{c}_{s}.csv').exists())}/{len(LG)*len(SS)} CSVs")
         else: print(f"  ✅ Football: {len(LG)*len(SS)} CSVs")
 
@@ -356,7 +374,8 @@ def run_football(R):
             from all_apis import NewsInjuryAPI
             news=NewsInjuryAPI.get_sports_news("football injury Premier League")
             if news: R["injury_news"]=news[:5]; print(f"    ✅ {len(news)} injury/news articles")
-        except: pass
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════
 # MULTI-SPORT

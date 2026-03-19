@@ -60,7 +60,8 @@ def _fetch(url, key, ttl=1):
             d=r.json()
             with open(cf,"w") as f: json.dump(d,f)
             return d
-    except: pass
+    except Exception:
+        pass
     return None
 
 def _parse_espn(data, league):
@@ -105,7 +106,8 @@ def fetch_football_data_org(api_key, competition="PL"):
                     "league":competition,"date":m.get("utcDate","")[:10],
                     "matchday":m.get("matchday"),"stage":m.get("stage","")})
             return matches
-    except: pass
+    except Exception:
+        pass
     return []
 
 def fetch_upcoming_football(leagues=None):
@@ -166,7 +168,8 @@ def fetch_and_format():
             for comp in ["EPL","La Liga","UCL"]:
                 extra=fetch_football_data_org(FOOTBALL_DATA_KEY,comp)
                 if extra: print(f"      +{len(extra)} from {comp}")
-    except: pass
+    except Exception:
+        pass
     return format_for_oracle(raw), raw
 
 if __name__=="__main__":

@@ -20,10 +20,16 @@ from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
-try: import xgboost as xgb; HAS_XGB=True
-except: HAS_XGB=False
-try: import lightgbm as lgb; HAS_LGB=True
-except: HAS_LGB=False
+try:
+    import xgboost as xgb
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+try:
+    import lightgbm as lgb
+    HAS_LGB = True
+except ImportError:
+    HAS_LGB = False
 
 warnings.filterwarnings("ignore")
 
@@ -154,7 +160,7 @@ def build_features_and_labels(df, elo):
         try:
             hg = int(row.get("FTHG", 0) or 0)
             ag = int(row.get("FTAG", 0) or 0)
-        except:
+        except (ValueError, TypeError):
             hg, ag = 0, 0
 
         # Get current stats BEFORE this match (to avoid leakage)
@@ -198,7 +204,7 @@ def build_features_and_labels(df, elo):
             odds_h = float(row.get("B365H", 0) or 0)
             odds_d = float(row.get("B365D", 0) or 0)
             odds_a = float(row.get("B365A", 0) or 0)
-        except:
+        except (ValueError, TypeError):
             odds_h, odds_d, odds_a = 2.0, 3.3, 3.5
 
         # Implied probabilities (normalized)
@@ -247,7 +253,8 @@ def build_features_and_labels(df, elo):
             team_stats[away]["corners"].append(int(row.get("AC",5) or 5))
             team_stats[home]["fouls"].append(int(row.get("HF",11) or 11))
             team_stats[away]["fouls"].append(int(row.get("AF",11) or 11))
-        except: pass
+        except (ValueError, TypeError):
+            pass
         team_stats[home]["points"].append(3 if result=="H" else 1 if result=="D" else 0)
         team_stats[away]["points"].append(3 if result=="A" else 1 if result=="D" else 0)
         h2h_record[h2h_key][result] += 1
@@ -467,7 +474,7 @@ def main():
         try:
             s = cross_val_score(model, Xs, y, cv=2, scoring="accuracy")
             cv_scores[name] = round(s.mean(), 3)
-        except:
+        except Exception:
             cv_scores[name] = round(float((model.predict(Xs)==y).mean()), 3)
 
     print(f"    ✅ {len(models)} models trained (3-class: Home/Draw/Away)")
@@ -664,9 +671,9 @@ def backtest_roi_on_training_data(df, elo, team_stats, models, scaler):
             odds_h = float(row.get("B365H", 2.0) or 2.0)
             odds_d = float(row.get("B365D", 3.3) or 3.3)
             odds_a = float(row.get("B365A", 3.5) or 3.5)
-        except:
+        except (ValueError, TypeError):
             continue
-        
+
         # Oracle's prediction (simplified — uses Elo)
         elo_h = elo.get(home)
         elo_a = elo.get(away)
