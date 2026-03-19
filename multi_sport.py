@@ -299,24 +299,27 @@ def run_all_sports(sport_keys=None, days_back=30, days_ahead=7):
 
     all_results={}; total=0
     for sport in sport_keys:
-        if sport not in SPORTS:
+        if sport == "F1":
+            # F1 uses OpenF1, not ESPN SPORTS dict
+            print(f"\n  🏎️ F1")
+            result = build_f1()
+        elif sport not in SPORTS:
             logger.warning(f"Unknown sport: {sport}")
             continue
-        print(f"\n  {ICONS.get(sport,'🏅')} {sport}")
-
-        cfg = SPORTS[sport]
-        lb = LOOKBACK.get(sport, days_back)
-
-        if sport == "UFC":
-            result = build_ufc(days_back=lb, days_ahead=14)
-        elif sport == "F1":
-            result = build_f1()
-        elif cfg["type"] == "team":
-            result = build_team_sport(sport, lb, days_ahead)
         else:
-            # Individual sports (ATP, WTA, GOLF) use team sport pipeline
-            # with home_adv=0 (no home court for individuals)
-            result = build_team_sport(sport, lb, days_ahead)
+            print(f"\n  {ICONS.get(sport,'🏅')} {sport}")
+
+        if sport != "F1":
+            cfg = SPORTS[sport]
+            lb = LOOKBACK.get(sport, days_back)
+
+            if sport == "UFC":
+                result = build_ufc(days_back=lb, days_ahead=14)
+            elif cfg["type"] == "team":
+                result = build_team_sport(sport, lb, days_ahead)
+            else:
+                # Individual sports (ATP, WTA, GOLF) use team sport pipeline
+                result = build_team_sport(sport, lb, days_ahead)
 
         all_results[sport]=result
         n=len(result.get("predictions",[])); total+=n
