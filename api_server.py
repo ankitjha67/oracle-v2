@@ -42,7 +42,8 @@ except ImportError:
     )
 
 from core import OracleDB, RatingEngine, BiasAuditor
-from analytics import AnalyticsEngine, EVCalculator, KellyStaker, EvaluationSuite
+from analytics import (AnalyticsEngine, EVCalculator, KellyStaker,
+                       EvaluationSuite, RatingChangePointDetector)
 
 # ── Pydantic models ────────────────────────────────────────────────────────
 
@@ -293,6 +294,52 @@ def analytics_calibration(sport: str, n_bins: int = 10):
     predicted = np.array([r["prob_a"] for r in rows])
     actual = np.array([r["is_correct"] for r in rows])
     return EvaluationSuite.calibration_data(predicted, actual, n_bins)
+
+
+@app.get("/explain/{prediction_id}")
+def explain_prediction(prediction_id: str):
+    """Get SHAP-based explanation for a specific prediction."""
+    conn = db._get_conn()
+    row = conn.execute(
+        "SELECT * FROM predictions WHERE id=?", (prediction_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
+
+    pred = dict(row)
+    import json
+    features = json.loads(pred.get("features_json", "{}"))
+    model_votes = json.loads(pred.get("model_votes_json", "{}"))
+
+    return {
+        "prediction_id": prediction_id,
+        "team_a": pred["team_a"],
+        "team_b": pred["team_b"],
+        "prob_a": pred["prob_a"],
+        "confidence": pred["confidence"],
+        "features": features,
+        "model_votes": model_votes,
+        "note": "For per-prediction SHAP values, use the engine.predict() output which includes shap_explanation",
+    }
+
+
+@app.get("/analytics/ratings/history/{team}")
+def rating_history(team: str, sport: str = "cricket", n: int = 100):
+    """Get rating history time series for a team."""
+    cpd = RatingChangePointDetector(db)
+    history = cpd.get_history(team, sport, n=n)
+    if not history:
+        raise HTTPException(status_code=404, detail=f"No rating history for {team} in {sport}")
+    return {"team": team, "sport": sport, "history": history}
+
+
+@app.get("/analytics/changepoint/{team}")
+def detect_changepoint(team: str, sport: str = "cricket",
+                       threshold: float = 2.0):
+    """Run CUSUM changepoint detection on a team's rating trajectory."""
+    cpd = RatingChangePointDetector(db)
+    result = cpd.detect(team, sport, threshold=threshold)
+    return result
 
 
 @app.get("/analytics/market-efficiency")

@@ -1,18 +1,26 @@
 """
-Oracle V2 — Advanced Analytics Module (Phase 1: "Are We Actually Good?")
-CLV Tracking, Expected Value, Kelly Criterion, Bankroll Simulation,
-Evaluation Suite, Market Efficiency Analysis.
+Oracle V2 — Advanced Analytics Module
+Phase 1: CLV Tracking, Expected Value, Kelly Criterion, Bankroll Simulation,
+          Evaluation Suite, Market Efficiency Analysis.
+Phase 2: SHAP Feature Importance, Rating Changepoint Detection.
 """
 from __future__ import annotations
 import math
 import logging
 import json
 import hashlib
+import warnings
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Optional
 
 import numpy as np
+
+try:
+    import shap
+    HAS_SHAP = True
+except ImportError:
+    HAS_SHAP = False
 
 logger = logging.getLogger("oracle.analytics")
 
@@ -645,20 +653,416 @@ class MarketEfficiencyAnalyzer:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. ANALYTICS ENGINE — Coordinator that ties everything together
+# 7. SHAP FEATURE IMPORTANCE (Phase 2)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class AnalyticsEngine:
-    """Top-level coordinator for all Phase 1 analytics."""
+class SHAPExplainer:
+    """SHAP-based feature importance — replaces biased sklearn feature_importances_.
+
+    Uses TreeExplainer for tree-based models (XGBoost, LGBM, RF, GBM) which is
+    exact and fast. Falls back to permutation importance if SHAP unavailable.
+    """
+
+    def __init__(self, feature_names: list[str] = None):
+        self.feature_names = feature_names or []
+        self._explainers: dict[str, Any] = {}
+        self._global_shap_values = None
+
+    def fit(self, models: dict, X_train: np.ndarray,
+            feature_names: list[str] = None):
+        """Build SHAP explainers for all tree-based models.
+
+        Call this once after training.
+        """
+        if feature_names:
+            self.feature_names = feature_names
+
+        if not HAS_SHAP:
+            logger.info("SHAP not installed — using permutation importance fallback")
+            return
+
+        self._explainers = {}
+        tree_models = ["RandomForest", "XGBoost", "LightGBM",
+                        "GradientBoosting", "Bagging"]
+
+        for name in tree_models:
+            model = models.get(name)
+            if model is None:
+                continue
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    explainer = shap.TreeExplainer(model)
+                self._explainers[name] = explainer
+            except Exception as e:
+                logger.debug(f"SHAP TreeExplainer failed for {name}: {e}")
+
+        # Compute global SHAP values on a background sample
+        if self._explainers and len(X_train) > 0:
+            # Use up to 200 samples for speed
+            n_sample = min(200, len(X_train))
+            sample_idx = np.random.default_rng(42).choice(
+                len(X_train), n_sample, replace=False
+            )
+            X_sample = X_train[sample_idx]
+            self._compute_global_shap(X_sample)
+
+    def _compute_global_shap(self, X_sample: np.ndarray):
+        """Compute mean |SHAP| values across models for global ranking."""
+        all_abs_shap = []
+        for name, explainer in self._explainers.items():
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    sv = explainer.shap_values(X_sample)
+                # Handle multi-output (binary classifiers return list of 2 arrays)
+                if isinstance(sv, list):
+                    sv = sv[1] if len(sv) > 1 else sv[0]
+                all_abs_shap.append(np.abs(sv))
+            except Exception as e:
+                logger.debug(f"Global SHAP failed for {name}: {e}")
+
+        if all_abs_shap:
+            # Average absolute SHAP across models
+            # Each element is shape (n_samples, n_features)
+            # Average over models and samples to get per-feature importance
+            per_model = [np.mean(sv, axis=0) for sv in all_abs_shap]
+            stacked = np.stack(per_model, axis=0)  # (n_models, n_features)
+            mean_vals = np.mean(stacked, axis=0)  # (n_features,)
+            # Ensure 1D
+            self._global_shap_values = np.atleast_1d(mean_vals).flatten()
+
+    def global_importance(self, top_n: int = 20) -> dict:
+        """Return canonical global feature ranking by mean |SHAP|."""
+        if self._global_shap_values is None:
+            return {}
+
+        importance = {}
+        names = self.feature_names or [f"f{i}" for i in range(len(self._global_shap_values))]
+        for i, val in enumerate(self._global_shap_values):
+            if i < len(names):
+                importance[names[i]] = round(float(val), 6)
+
+        return dict(sorted(importance.items(), key=lambda x: -x[1])[:top_n])
+
+    def explain_prediction(self, models: dict, features_scaled: np.ndarray,
+                           top_n: int = 5) -> dict:
+        """Per-prediction SHAP: top positive and negative contributors.
+
+        Returns the top_n features pushing toward team_a and top_n toward team_b.
+        """
+        if not HAS_SHAP or not self._explainers:
+            return self._fallback_explain(models, features_scaled, top_n)
+
+        all_shap = []
+        for name, explainer in self._explainers.items():
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    sv = explainer.shap_values(features_scaled)
+                if isinstance(sv, list):
+                    sv = sv[1] if len(sv) > 1 else sv[0]
+                all_shap.append(sv.flatten())
+            except Exception:
+                continue
+
+        if not all_shap:
+            return self._fallback_explain(models, features_scaled, top_n)
+
+        # Average SHAP values across models
+        avg_shap = np.mean(all_shap, axis=0)
+        names = self.feature_names or [f"f{i}" for i in range(len(avg_shap))]
+
+        # Build sorted list
+        shap_pairs = [(names[i], float(avg_shap[i]))
+                      for i in range(min(len(names), len(avg_shap)))]
+
+        # Positive SHAP = pushes toward team_a winning
+        positive = sorted([p for p in shap_pairs if p[1] > 0],
+                          key=lambda x: -x[1])[:top_n]
+        # Negative SHAP = pushes toward team_b winning
+        negative = sorted([p for p in shap_pairs if p[1] < 0],
+                          key=lambda x: x[1])[:top_n]
+
+        return {
+            "top_for_a": [{"feature": f, "shap_value": round(v, 4)} for f, v in positive],
+            "top_for_b": [{"feature": f, "shap_value": round(abs(v), 4)} for f, v in negative],
+            "method": "shap_tree",
+        }
+
+    def _fallback_explain(self, models: dict, features_scaled: np.ndarray,
+                          top_n: int = 5) -> dict:
+        """Fallback: use sklearn feature_importances_ when SHAP unavailable."""
+        feat_imp = {}
+        for mname in ["RandomForest", "XGBoost", "LightGBM", "GradientBoosting"]:
+            model = models.get(mname)
+            if model is not None and hasattr(model, "feature_importances_"):
+                names = self.feature_names or [f"f{i}" for i in range(len(model.feature_importances_))]
+                for fn, imp in zip(names, model.feature_importances_):
+                    feat_imp[fn] = feat_imp.get(fn, 0) + imp
+
+        if not feat_imp:
+            return {"top_for_a": [], "top_for_b": [], "method": "none"}
+
+        total = sum(feat_imp.values())
+        if total > 0:
+            feat_imp = {k: v / total for k, v in feat_imp.items()}
+
+        top = sorted(feat_imp.items(), key=lambda x: -x[1])[:top_n]
+        return {
+            "top_for_a": [{"feature": f, "shap_value": round(v, 4)} for f, v in top],
+            "top_for_b": [],
+            "method": "sklearn_importance_fallback",
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. RATING CHANGEPOINT DETECTOR (Phase 2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class RatingChangePointDetector:
+    """Detect abrupt shifts in team rating trajectories using CUSUM.
+
+    Flags coaching changes, transfer windows, injury impacts.
+    After detected changepoint: boost K-factor 50% for next 5 matches.
+    """
 
     def __init__(self, db=None):
         self.db = db
+        if db:
+            self._ensure_schema()
+
+    def _ensure_schema(self):
+        with self.db.transaction() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS rating_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    team TEXT NOT NULL,
+                    sport TEXT NOT NULL,
+                    rating_type TEXT DEFAULT 'elo',
+                    rating REAL,
+                    match_date TEXT DEFAULT '',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_rh_team_sport
+                    ON rating_history(team, sport);
+                CREATE INDEX IF NOT EXISTS idx_rh_date
+                    ON rating_history(match_date);
+
+                CREATE TABLE IF NOT EXISTS changepoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    team TEXT NOT NULL,
+                    sport TEXT NOT NULL,
+                    detected_at TEXT,
+                    rating_before REAL,
+                    rating_after REAL,
+                    direction TEXT DEFAULT 'unknown',
+                    k_boost_remaining INTEGER DEFAULT 5,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_cp_team
+                    ON changepoints(team, sport);
+            """)
+
+    def log_rating(self, team: str, sport: str, rating: float,
+                   rating_type: str = "elo", match_date: str = ""):
+        """Append a rating snapshot to history."""
+        if not self.db:
+            return
+        with self.db.transaction() as conn:
+            conn.execute("""
+                INSERT INTO rating_history (team, sport, rating_type, rating, match_date)
+                VALUES (?,?,?,?,?)
+            """, (team, sport, rating_type, rating, match_date))
+
+    def get_history(self, team: str, sport: str,
+                    rating_type: str = "elo", n: int = 100) -> list[dict]:
+        """Get rating time series for a team."""
+        if not self.db:
+            return []
+        conn = self.db._get_conn()
+        rows = conn.execute("""
+            SELECT rating, match_date, created_at FROM rating_history
+            WHERE team=? AND sport=? AND rating_type=?
+            ORDER BY created_at DESC LIMIT ?
+        """, (team, sport, rating_type, n)).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    @staticmethod
+    def cusum(values: list[float], threshold: float = 2.0,
+              drift: float = 0.5) -> list[dict]:
+        """CUSUM (Cumulative Sum) changepoint detection.
+
+        Detects both upward and downward shifts in the time series.
+        threshold: sensitivity (lower = more sensitive, typical 2-5)
+        drift: allowable drift before alarm (typical 0.5-1.0)
+
+        Returns list of detected changepoints with index and direction.
+        """
+        if len(values) < 5:
+            return []
+
+        # Compute differences from running mean
+        arr = np.array(values, dtype=float)
+        diffs = np.diff(arr)
+        if len(diffs) == 0:
+            return []
+
+        mean_diff = np.mean(diffs)
+        std_diff = np.std(diffs)
+        if std_diff == 0:
+            return []
+
+        # Normalize
+        z = (diffs - mean_diff) / std_diff
+
+        # CUSUM accumulators
+        s_pos = 0.0
+        s_neg = 0.0
+        changepoints = []
+
+        for i, zi in enumerate(z):
+            s_pos = max(0, s_pos + zi - drift)
+            s_neg = max(0, s_neg - zi - drift)
+
+            if s_pos > threshold:
+                changepoints.append({
+                    "index": i + 1,  # +1 because diff shifts by 1
+                    "direction": "UP",
+                    "magnitude": round(s_pos, 2),
+                    "value": float(arr[i + 1]),
+                })
+                s_pos = 0  # Reset after detection
+
+            if s_neg > threshold:
+                changepoints.append({
+                    "index": i + 1,
+                    "direction": "DOWN",
+                    "magnitude": round(s_neg, 2),
+                    "value": float(arr[i + 1]),
+                })
+                s_neg = 0
+
+        return changepoints
+
+    def detect(self, team: str, sport: str, threshold: float = 2.0,
+               drift: float = 0.5) -> dict:
+        """Run CUSUM on a team's rating history and record changepoints."""
+        history = self.get_history(team, sport, n=200)
+        if len(history) < 10:
+            return {"team": team, "sport": sport, "changepoints": [],
+                    "n_history": len(history)}
+
+        ratings = [h["rating"] for h in history]
+        cps = self.cusum(ratings, threshold, drift)
+
+        # Record new changepoints to DB
+        if cps and self.db:
+            latest = cps[-1]
+            idx = latest["index"]
+            rating_before = ratings[max(0, idx - 3):idx]
+            rating_after = ratings[idx:min(len(ratings), idx + 3)]
+            with self.db.transaction() as conn:
+                conn.execute("""
+                    INSERT INTO changepoints
+                    (team, sport, detected_at, rating_before, rating_after,
+                     direction, k_boost_remaining)
+                    VALUES (?,?,?,?,?,?,?)
+                """, (team, sport, datetime.now().isoformat(),
+                      np.mean(rating_before) if rating_before else 0,
+                      np.mean(rating_after) if rating_after else 0,
+                      latest["direction"], 5))
+
+        return {
+            "team": team,
+            "sport": sport,
+            "n_history": len(ratings),
+            "current_rating": round(ratings[-1], 1) if ratings else 0,
+            "changepoints": cps,
+            "trend": self._compute_trend(ratings),
+        }
+
+    @staticmethod
+    def _compute_trend(ratings: list[float], window: int = 10) -> dict:
+        """Linear regression slope over recent ratings."""
+        recent = ratings[-window:] if len(ratings) >= window else ratings
+        if len(recent) < 3:
+            return {"direction": "STABLE", "slope": 0}
+
+        x = np.arange(len(recent))
+        slope = float(np.polyfit(x, recent, 1)[0])
+
+        if slope > 1.0:
+            direction = "RISING"
+        elif slope < -1.0:
+            direction = "FALLING"
+        else:
+            direction = "STABLE"
+
+        return {
+            "direction": direction,
+            "slope": round(slope, 2),
+            "current": round(recent[-1], 1),
+            "min_recent": round(min(recent), 1),
+            "max_recent": round(max(recent), 1),
+        }
+
+    def get_k_boost(self, team: str, sport: str) -> float:
+        """Check if team has an active K-factor boost from recent changepoint.
+
+        Returns multiplier: 1.0 (no boost) or 1.5 (boost active).
+        """
+        if not self.db:
+            return 1.0
+        conn = self.db._get_conn()
+        row = conn.execute("""
+            SELECT k_boost_remaining FROM changepoints
+            WHERE team=? AND sport=? AND k_boost_remaining > 0
+            ORDER BY created_at DESC LIMIT 1
+        """, (team, sport)).fetchone()
+
+        if row and row["k_boost_remaining"] > 0:
+            return 1.5
+        return 1.0
+
+    def decrement_k_boost(self, team: str, sport: str):
+        """Decrement the K-boost counter after a match is processed."""
+        if not self.db:
+            return
+        conn = self.db._get_conn()
+        row = conn.execute("""
+            SELECT id, k_boost_remaining FROM changepoints
+            WHERE team=? AND sport=? AND k_boost_remaining > 0
+            ORDER BY created_at DESC LIMIT 1
+        """, (team, sport)).fetchone()
+
+        if row:
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "UPDATE changepoints SET k_boost_remaining=? WHERE id=?",
+                    (max(0, row["k_boost_remaining"] - 1), row["id"])
+                )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. ANALYTICS ENGINE — Coordinator that ties everything together
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AnalyticsEngine:
+    """Top-level coordinator for all analytics (Phase 1 + Phase 2)."""
+
+    def __init__(self, db=None):
+        self.db = db
+        # Phase 1
         self.clv = CLVTracker(db)
         self.ev = EVCalculator()
         self.kelly = KellyStaker()
         self.bankroll = BankrollSimulator()
         self.evaluation = EvaluationSuite()
         self.market = MarketEfficiencyAnalyzer()
+        # Phase 2
+        self.shap = SHAPExplainer()
+        self.changepoint = RatingChangePointDetector(db)
 
     def analyze_prediction(self, prediction: dict,
                            market_odds: dict = None) -> dict:

@@ -666,11 +666,24 @@ class OracleV2:
                 self.calibrator.fit_platt(all_probs_arr, y)
                 self.calibrator.fit_isotonic(all_probs_arr, y, n_bins=15)
 
+        # SHAP explainer (Phase 2) — fit on training data
+        self._shap_explainer = None
+        try:
+            from analytics import SHAPExplainer
+            self._shap_explainer = SHAPExplainer(FEATURE_NAMES)
+            self._shap_explainer.fit(self.models, X_scaled, FEATURE_NAMES)
+        except Exception as e:
+            logger.debug(f"SHAP explainer setup: {e}")
+
         self.is_trained = True
+        shap_global = {}
+        if self._shap_explainer:
+            shap_global = self._shap_explainer.global_importance(top_n=20)
         self.training_stats = {
             "matches": len(X), "features": X.shape[1],
             "models": len(self.models), "cv_scores": cv_scores,
             "has_meta_learner": self.meta_learner is not None,
+            "shap_global_importance": shap_global,
         }
         return self.training_stats
 
@@ -733,16 +746,25 @@ class OracleV2:
         confidence = ("VERY HIGH" if effective_diff > 0.45 else "HIGH" if effective_diff > 0.30 else
                       "MODERATE" if effective_diff > 0.15 else "LOW" if effective_diff > 0.05 else "TOSS-UP")
 
-        # Feature importance
+        # Feature importance — SHAP (Phase 2) with sklearn fallback
         feat_imp = {}
-        for mname in ["RandomForest", "XGBoost", "LightGBM", "GradientBoosting"]:
-            if mname in self.models and hasattr(self.models[mname], "feature_importances_"):
-                for fn, imp in zip(FEATURE_NAMES, self.models[mname].feature_importances_):
-                    feat_imp[fn] = feat_imp.get(fn, 0) + imp
-        if feat_imp:
-            total = sum(feat_imp.values())
-            feat_imp = {k: round(v/total, 4) for k, v in
-                        sorted(feat_imp.items(), key=lambda x: -x[1])[:15]}
+        shap_explanation = {}
+        if self._shap_explainer is not None:
+            shap_explanation = self._shap_explainer.explain_prediction(
+                self.models, features_scaled, top_n=5
+            )
+            # Build feat_imp from SHAP global for backward compatibility
+            feat_imp = self._shap_explainer.global_importance(top_n=15)
+        if not feat_imp:
+            # Fallback to sklearn feature_importances_
+            for mname in ["RandomForest", "XGBoost", "LightGBM", "GradientBoosting"]:
+                if mname in self.models and hasattr(self.models[mname], "feature_importances_"):
+                    for fn, imp in zip(FEATURE_NAMES, self.models[mname].feature_importances_):
+                        feat_imp[fn] = feat_imp.get(fn, 0) + imp
+            if feat_imp:
+                total = sum(feat_imp.values())
+                feat_imp = {k: round(v/total, 4) for k, v in
+                            sorted(feat_imp.items(), key=lambda x: -x[1])[:15]}
 
         # Confidence interval from bootstrap over model outputs
         ci_data = {}
@@ -805,6 +827,7 @@ class OracleV2:
             "models_for_b": sum(1 for v in model_votes.values()
                                 if v["winner"] == match["team_b"]),
             "feature_importance": feat_imp,
+            "shap_explanation": shap_explanation,
             "analytics": analytics_data,
             "weather": weather,
             "odds_market": {"prob_a": match.get("odds_prob_a", 0),

@@ -520,6 +520,8 @@ class RatingEngine:
 
     def __init__(self, db: OracleDB):
         self.db = db
+        self._rating_tracker = None  # Set by analytics for history tracking
+        self._changepoint_detector = None  # Set by analytics for K-boost
 
     # Stage-dependent K-factor: knockouts matter more than group stage
     STAGE_K_FACTORS = {
@@ -531,13 +533,17 @@ class RatingEngine:
 
     def elo_update(self, winner: str, loser: str, sport: str,
                    K: float = 32, margin: float = 0,
-                   stage: str = "") -> tuple[float, float]:
+                   stage: str = "", match_date: str = "") -> tuple[float, float]:
         w = self.db.get_rating(winner, sport, "elo")
         l = self.db.get_rating(loser, sport, "elo")
         expected = 1.0 / (1.0 + 10 ** ((l["rating"] - w["rating"]) / 400))
         # Dynamic K-factor based on match importance
         if stage:
             K = self.STAGE_K_FACTORS.get(stage.lower().replace(" ", "_"), K)
+        # K-factor boost from changepoint detection (Phase 2)
+        if self._changepoint_detector:
+            K *= self._changepoint_detector.get_k_boost(winner, sport)
+            K *= self._changepoint_detector.get_k_boost(loser, sport)
         # MOV adjustment
         mov_mult = 1.0
         if margin > 0:
@@ -549,6 +555,13 @@ class RatingEngine:
                               rating=new_w, matches_played=w["matches_played"]+1)
         self.db.update_rating(loser, sport, "elo",
                               rating=new_l, matches_played=l["matches_played"]+1)
+        # Log rating history + decrement K-boost (Phase 2)
+        if self._rating_tracker:
+            self._rating_tracker.log_rating(winner, sport, new_w, "elo", match_date)
+            self._rating_tracker.log_rating(loser, sport, new_l, "elo", match_date)
+        if self._changepoint_detector:
+            self._changepoint_detector.decrement_k_boost(winner, sport)
+            self._changepoint_detector.decrement_k_boost(loser, sport)
         return new_w, new_l
 
     def glicko2_update(self, winner: str, loser: str, sport: str):

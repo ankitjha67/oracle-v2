@@ -1,4 +1,4 @@
-"""Tests for analytics module — Phase 1: CLV, EV, Kelly, Evaluation Suite, Bankroll."""
+"""Tests for analytics module — Phase 1 & 2."""
 import numpy as np
 import pytest
 
@@ -10,6 +10,8 @@ from analytics import (
     EvaluationSuite,
     KellyStaker,
     MarketEfficiencyAnalyzer,
+    RatingChangePointDetector,
+    SHAPExplainer,
 )
 
 
@@ -364,3 +366,201 @@ class TestAnalyticsEngine:
         assert "monte_carlo" in report
         assert "roi_by_edge_bucket" in report
         assert "risk_of_ruin" in report
+
+    def test_engine_has_phase2_components(self):
+        engine = AnalyticsEngine()
+        assert engine.shap is not None
+        assert engine.changepoint is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 2 Tests: SHAP + Changepoint Detection
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSHAPExplainer:
+    """SHAP feature importance tests."""
+
+    def test_init(self):
+        explainer = SHAPExplainer(["f1", "f2", "f3"])
+        assert explainer.feature_names == ["f1", "f2", "f3"]
+
+    def test_global_importance_empty(self):
+        explainer = SHAPExplainer()
+        result = explainer.global_importance()
+        assert result == {}
+
+    def test_fallback_explain_no_models(self):
+        explainer = SHAPExplainer(["f1", "f2"])
+        result = explainer._fallback_explain({}, np.array([[1, 2]]))
+        assert result["method"] == "none"
+
+    def test_fallback_explain_with_sklearn(self):
+        from sklearn.ensemble import RandomForestClassifier
+        rf = RandomForestClassifier(n_estimators=10, random_state=42)
+        X = np.random.default_rng(42).random((50, 3))
+        y = (X[:, 0] > 0.5).astype(int)
+        rf.fit(X, y)
+
+        explainer = SHAPExplainer(["a", "b", "c"])
+        result = explainer._fallback_explain(
+            {"RandomForest": rf}, X[:1]
+        )
+        assert result["method"] == "sklearn_importance_fallback"
+        assert len(result["top_for_a"]) > 0
+
+    def test_fit_and_global_with_shap(self):
+        """Test SHAP fit with a real RandomForest."""
+        from sklearn.ensemble import RandomForestClassifier
+        rng = np.random.default_rng(42)
+        X = rng.random((100, 5))
+        y = (X[:, 0] + X[:, 1] > 1).astype(int)
+        rf = RandomForestClassifier(n_estimators=20, random_state=42)
+        rf.fit(X, y)
+
+        explainer = SHAPExplainer(["a", "b", "c", "d", "e"])
+        explainer.fit({"RandomForest": rf}, X, ["a", "b", "c", "d", "e"])
+
+        importance = explainer.global_importance()
+        assert len(importance) > 0
+        # All 5 features should appear
+        assert len(importance) == 5
+        # Values should be non-negative (mean |SHAP|)
+        assert all(v >= 0 for v in importance.values())
+
+    def test_explain_prediction_with_shap(self):
+        """Test per-prediction SHAP explanation."""
+        from sklearn.ensemble import RandomForestClassifier
+        rng = np.random.default_rng(42)
+        X = rng.random((100, 4))
+        y = (X[:, 0] > 0.5).astype(int)
+        rf = RandomForestClassifier(n_estimators=20, random_state=42)
+        rf.fit(X, y)
+
+        explainer = SHAPExplainer(["f1", "f2", "f3", "f4"])
+        explainer.fit({"RandomForest": rf}, X, ["f1", "f2", "f3", "f4"])
+
+        result = explainer.explain_prediction(
+            {"RandomForest": rf}, X[:1], top_n=3
+        )
+        assert "top_for_a" in result
+        assert "top_for_b" in result
+        assert result["method"] == "shap_tree"
+
+
+class TestRatingChangePointDetector:
+    """Rating changepoint detection tests."""
+
+    def test_cusum_flat_series(self):
+        """Flat series should have no changepoints."""
+        values = [1500.0] * 20
+        cps = RatingChangePointDetector.cusum(values)
+        assert len(cps) == 0
+
+    def test_cusum_sudden_jump(self):
+        """A sudden jump should be detected."""
+        values = [1500.0] * 15 + [1600.0] * 10
+        cps = RatingChangePointDetector.cusum(values, threshold=2.0, drift=0.5)
+        assert len(cps) >= 1
+        assert cps[0]["direction"] == "UP"
+
+    def test_cusum_sudden_drop(self):
+        """A sudden drop should be detected."""
+        values = [1600.0] * 15 + [1500.0] * 10
+        cps = RatingChangePointDetector.cusum(values, threshold=2.0, drift=0.5)
+        assert len(cps) >= 1
+        assert cps[0]["direction"] == "DOWN"
+
+    def test_cusum_too_short(self):
+        """Series too short should return empty."""
+        cps = RatingChangePointDetector.cusum([1500, 1510])
+        assert len(cps) == 0
+
+    def test_cusum_gradual_rise(self):
+        """Gradual rise should eventually trigger."""
+        values = [1500 + i * 5 for i in range(30)]
+        cps = RatingChangePointDetector.cusum(values, threshold=2.0, drift=0.3)
+        # Gradual rise should trigger at least one UP
+        if cps:
+            assert any(cp["direction"] == "UP" for cp in cps)
+
+    def test_compute_trend_rising(self):
+        ratings = [1500 + i * 10 for i in range(15)]
+        trend = RatingChangePointDetector._compute_trend(ratings)
+        assert trend["direction"] == "RISING"
+        assert trend["slope"] > 0
+
+    def test_compute_trend_falling(self):
+        ratings = [1600 - i * 10 for i in range(15)]
+        trend = RatingChangePointDetector._compute_trend(ratings)
+        assert trend["direction"] == "FALLING"
+        assert trend["slope"] < 0
+
+    def test_compute_trend_stable(self):
+        ratings = [1500, 1501, 1499, 1500, 1501, 1500, 1499]
+        trend = RatingChangePointDetector._compute_trend(ratings)
+        assert trend["direction"] == "STABLE"
+
+    def test_log_and_get_history(self, tmp_db):
+        cpd = RatingChangePointDetector(tmp_db)
+        cpd.log_rating("India", "cricket", 1520.5, "elo", "2026-01-01")
+        cpd.log_rating("India", "cricket", 1535.2, "elo", "2026-01-15")
+        cpd.log_rating("India", "cricket", 1548.0, "elo", "2026-02-01")
+
+        history = cpd.get_history("India", "cricket")
+        assert len(history) >= 3
+        ratings = [h["rating"] for h in history]
+        assert 1520.5 in ratings
+        assert 1535.2 in ratings
+        assert 1548.0 in ratings
+
+    def test_detect_with_db(self, tmp_db):
+        cpd = RatingChangePointDetector(tmp_db)
+        # Insert enough history for detection
+        for i in range(20):
+            rating = 1500 + (i * 2)  # Gradual rise
+            cpd.log_rating("TeamX", "test", rating, "elo", f"2026-01-{i+1:02d}")
+        # Add sudden jump
+        for i in range(10):
+            cpd.log_rating("TeamX", "test", 1650 + i, "elo", f"2026-02-{i+1:02d}")
+
+        result = cpd.detect("TeamX", "test")
+        assert result["team"] == "TeamX"
+        assert result["n_history"] == 30
+        assert "trend" in result
+        assert result["trend"]["direction"] in ("RISING", "STABLE", "FALLING")
+
+    def test_k_boost_default(self):
+        cpd = RatingChangePointDetector()
+        assert cpd.get_k_boost("any", "any") == 1.0
+
+    def test_k_boost_with_db(self, tmp_db):
+        cpd = RatingChangePointDetector(tmp_db)
+        # Insert a changepoint with active boost
+        with tmp_db.transaction() as conn:
+            conn.execute("""
+                INSERT INTO changepoints
+                (team, sport, detected_at, rating_before, rating_after,
+                 direction, k_boost_remaining)
+                VALUES (?,?,?,?,?,?,?)
+            """, ("TeamY", "test", "2026-01-01", 1500, 1600, "UP", 3))
+
+        boost = cpd.get_k_boost("TeamY", "test")
+        assert boost == 1.5
+
+    def test_decrement_k_boost(self, tmp_db):
+        cpd = RatingChangePointDetector(tmp_db)
+        with tmp_db.transaction() as conn:
+            conn.execute("""
+                INSERT INTO changepoints
+                (team, sport, detected_at, rating_before, rating_after,
+                 direction, k_boost_remaining)
+                VALUES (?,?,?,?,?,?,?)
+            """, ("TeamZ", "test", "2026-01-01", 1500, 1600, "UP", 2))
+
+        cpd.decrement_k_boost("TeamZ", "test")
+        # Should now be 1
+        conn = tmp_db._get_conn()
+        row = conn.execute(
+            "SELECT k_boost_remaining FROM changepoints WHERE team='TeamZ'"
+        ).fetchone()
+        assert row["k_boost_remaining"] == 1

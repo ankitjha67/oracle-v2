@@ -86,7 +86,7 @@ FOOTBALL_DIR = OUTPUT_DIR / "football_data"
 
 from core import (OracleDB, RatingEngine, ProbabilityCalibrator, MonteCarloSimulator, BiasAuditor, BacktestResult)
 from engine import (PlayerDatabase, extract_features, FEATURE_NAMES, build_models, OracleV2, get_venue_data)
-from analytics import AnalyticsEngine, EvaluationSuite
+from analytics import AnalyticsEngine, EvaluationSuite, RatingChangePointDetector
 from cricsheet_pipeline import build_player_database, WC_SQUADS
 from football_pipeline import (load_all_matches, FootballElo, build_features_and_labels,
     build_football_models, predict_upcoming, poisson_score_predict, backtest_roi_on_training_data,
@@ -200,6 +200,10 @@ def run_cricket(R):
     print(f"\n  [1] {n} matches → {len(players)} players")
 
     db=OracleDB(str(OUTPUT_DIR/"oracle.db")); ratings=RatingEngine(db)
+    # Phase 2: Hook changepoint detector and rating history tracker
+    cpd=RatingChangePointDetector(db)
+    ratings._rating_tracker=cpd
+    ratings._changepoint_detector=cpd
     scored=[m for m in CRICKET_RESULTS if m.get("winner","") not in ("","NO RESULT")]
     for m in CRICKET_RESULTS: m["sport"]="cricket"; db.insert_match(m)
     for m in scored:
