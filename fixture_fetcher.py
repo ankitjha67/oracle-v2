@@ -110,12 +110,12 @@ def fetch_football_data_org(api_key, competition="PL"):
         pass
     return []
 
-def fetch_upcoming_football(leagues=None):
-    """Fetch all upcoming football matches."""
+def fetch_upcoming_football(leagues=None, days_ahead=14):
+    """Fetch all upcoming football matches — checks every day."""
     if leagues is None: leagues=FOOTBALL_LEAGUES
-    all_matches=[]; today=datetime.now().strftime("%Y%m%d"); seen=set()
+    all_matches=[]; seen=set()
     for lg,path in leagues.items():
-        for days in range(8):
+        for days in range(days_ahead + 1):
             dt=(datetime.now()+timedelta(days=days)).strftime("%Y%m%d")
             data=_fetch(f"{ESPN}/{path}/scoreboard?dates={dt}",f"espn_{lg}_{dt}",1 if days==0 else 6)
             if not data: continue

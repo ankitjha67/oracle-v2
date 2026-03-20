@@ -153,9 +153,9 @@ def _parse_fight_event(event):
 def build_team_sport(sport_key, days_back=30, days_ahead=7):
     """NBA, NHL, MLB, NFL — standard team sport pipeline."""
     cfg=SPORTS[sport_key]; elo=SportElo(1500,cfg["K"],cfg["home"])
-    # Build Elo from recent results
+    # Build Elo from recent results — check every day
     results=[]
-    for d in range(0,days_back,3):
+    for d in range(days_back):
         dt=(datetime.now()-timedelta(days=d)).strftime("%Y%m%d")
         data=_fetch(f"{ESPN}/{cfg['espn']}/scoreboard?dates={dt}",f"h_{sport_key}_{dt}",24)
         if not data: continue
@@ -190,9 +190,9 @@ def build_team_sport(sport_key, days_back=30, days_ahead=7):
 def build_ufc(days_back=60, days_ahead=14):
     """UFC — fighter-level predictions from ESPN."""
     elo=SportElo(1500,40,0)
-    # Build Elo from recent fight results
+    # Build Elo from recent fight results — check every day
     results=[]
-    for d in range(0,days_back,7):
+    for d in range(days_back):
         dt=(datetime.now()-timedelta(days=d)).strftime("%Y%m%d")
         data=_fetch(f"{ESPN}/mma/ufc/scoreboard?dates={dt}",f"h_ufc_{dt}",24)
         if not data: continue
