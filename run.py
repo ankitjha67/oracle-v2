@@ -86,7 +86,8 @@ FOOTBALL_DIR = OUTPUT_DIR / "football_data"
 
 from core import (OracleDB, RatingEngine, ProbabilityCalibrator, MonteCarloSimulator, BiasAuditor, BacktestResult)
 from engine import (PlayerDatabase, extract_features, FEATURE_NAMES, build_models, OracleV2, get_venue_data)
-from analytics import AnalyticsEngine, EvaluationSuite, RatingChangePointDetector
+from analytics import (AnalyticsEngine, EvaluationSuite, RatingChangePointDetector,
+                       PredictionTimeSeries, MarketEfficiencyMonitor)
 from cricsheet_pipeline import build_player_database, WC_SQUADS
 from football_pipeline import (load_all_matches, FootballElo, build_features_and_labels,
     build_football_models, predict_upcoming, poisson_score_predict, backtest_roi_on_training_data,
@@ -472,6 +473,19 @@ def run(cricket=True, football=True, multi=True):
                     print(f"\n  CLV Summary ({clv['n']} bets):")
                     print(f"    Avg CLV: {clv.get('avg_clv', 0):+.4f}  "
                           f"Positive: {clv.get('pct_positive', 0):.1%}")
+
+                # Phase 3: Degradation check + edge niches
+                monitor = MarketEfficiencyMonitor(_adb)
+                niches = monitor.edge_by_niche(n=300)
+                if niches and "error" not in niches:
+                    R["analytics_edge_niches"] = niches
+                    profitable = [k for k, v in niches.items() if v.get("profitable")]
+                    if profitable:
+                        print(f"\n  Profitable Niches ({len(profitable)}):")
+                        for k in profitable[:5]:
+                            n_info = niches[k]
+                            print(f"    {k:<25} Acc={n_info['accuracy']:.1%}  "
+                                  f"Sharpe={n_info['sharpe']:.2f}  n={n_info['n']}")
             else:
                 print(f"  {eval_report.get('error', 'No data')}")
     except Exception as e:

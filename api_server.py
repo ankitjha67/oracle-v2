@@ -43,7 +43,10 @@ except ImportError:
 
 from core import OracleDB, RatingEngine, BiasAuditor
 from analytics import (AnalyticsEngine, EVCalculator, KellyStaker,
-                       EvaluationSuite, RatingChangePointDetector)
+                       EvaluationSuite, RatingChangePointDetector,
+                       SeasonSimulator, PlayoffCalculator,
+                       MarketEfficiencyMonitor, PredictionTimeSeries,
+                       LEAGUE_RULES)
 
 # ── Pydantic models ────────────────────────────────────────────────────────
 
@@ -367,6 +370,109 @@ def analytics_market_efficiency():
         })
     from analytics import MarketEfficiencyAnalyzer
     return MarketEfficiencyAnalyzer.edge_report(bets)
+
+
+# ── Phase 3 Endpoints ─────────────────────────────────────────────────────
+
+@app.post("/analytics/season-simulation")
+def season_simulation(
+    league: str = "football",
+    n_sims: int = 1000,
+    playoff_spots: int = 4,
+    relegation_spots: int = 3,
+    standings: dict = None,
+    remaining_fixtures: list = None,
+):
+    """Monte Carlo season simulation — project final standings from current state.
+
+    POST body: {"standings": {"Team": {"points": N, "gd": N}},
+                "remaining_fixtures": [{"home": "A", "away": "B"}]}
+    """
+    if not standings or not remaining_fixtures:
+        raise HTTPException(status_code=400,
+                            detail="standings and remaining_fixtures required")
+    rules = LEAGUE_RULES.get(league, LEAGUE_RULES["football"])
+    sim = SeasonSimulator(league_rules=rules)
+    result = sim.simulate(standings, remaining_fixtures,
+                          n_sims=n_sims, playoff_spots=playoff_spots,
+                          relegation_spots=relegation_spots)
+    return result
+
+
+@app.post("/analytics/playoff-simulation")
+def playoff_simulation(
+    seeds: list[str] = None,
+    best_of: int = 1,
+    n_sims: int = 5000,
+):
+    """Simulate a seeded playoff bracket (single elimination or best-of-N).
+
+    POST body: {"seeds": ["Team1", "Team2", ...], "best_of": 7}
+    Bracket size must be a power of 2.
+    """
+    if not seeds or len(seeds) < 2:
+        raise HTTPException(status_code=400,
+                            detail="seeds list with >= 2 teams required")
+    calc = PlayoffCalculator()
+    result = calc.bracket_simulation(seeds, n_sims=n_sims, best_of=best_of)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.get("/analytics/rolling-performance")
+def rolling_performance(sport: str = None, n: int = 500):
+    """Rolling accuracy and Brier score over time windows (20, 50, 100)."""
+    monitor = MarketEfficiencyMonitor(db)
+    result = monitor.rolling_performance(sport=sport, n=n)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.get("/analytics/degradation")
+def check_degradation(sport: str = None, n: int = 200):
+    """Check if model accuracy is degrading over recent predictions."""
+    conn = db._get_conn()
+    q = "SELECT prob_a, is_correct FROM predictions WHERE is_correct >= 0"
+    params: list = []
+    if sport:
+        q += " AND sport=?"
+        params.append(sport)
+    q += " ORDER BY created_at DESC LIMIT ?"
+    params.append(n)
+    rows = conn.execute(q, params).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No scored predictions")
+
+    accuracies = [
+        1 if (r["prob_a"] > 0.5 and r["is_correct"] == 1) or
+             (r["prob_a"] <= 0.5 and r["is_correct"] == 0) else 0
+        for r in rows
+    ]
+    return MarketEfficiencyMonitor.detect_degradation(accuracies)
+
+
+@app.get("/analytics/edge-niches")
+def edge_niches(n: int = 500):
+    """Find the most profitable sport x confidence niches (Sharpe-ranked)."""
+    monitor = MarketEfficiencyMonitor(db)
+    result = monitor.edge_by_niche(n=n)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.get("/analytics/prediction-evolution/{match_id}")
+def prediction_evolution(match_id: str):
+    """Get probability evolution timeline for a specific match."""
+    ts = PredictionTimeSeries(db)
+    evolution = ts.get_evolution(match_id)
+    if not evolution:
+        raise HTTPException(status_code=404,
+                            detail=f"No prediction snapshots for {match_id}")
+    drift = ts.probability_drift(match_id)
+    return {"evolution": evolution, "drift": drift}
 
 
 # ── Main ───────────────────────────────────────────────────────────────────

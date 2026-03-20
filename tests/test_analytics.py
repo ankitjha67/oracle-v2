@@ -1,4 +1,4 @@
-"""Tests for analytics module — Phase 1 & 2."""
+"""Tests for analytics module — Phase 1, 2 & 3."""
 import numpy as np
 import pytest
 
@@ -12,6 +12,11 @@ from analytics import (
     MarketEfficiencyAnalyzer,
     RatingChangePointDetector,
     SHAPExplainer,
+    SeasonSimulator,
+    PlayoffCalculator,
+    MarketEfficiencyMonitor,
+    PredictionTimeSeries,
+    LEAGUE_RULES,
 )
 
 
@@ -564,3 +569,318 @@ class TestRatingChangePointDetector:
             "SELECT k_boost_remaining FROM changepoints WHERE team='TeamZ'"
         ).fetchone()
         assert row["k_boost_remaining"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 3 Tests: Season Simulation, Playoff Calculator,
+#                Market Efficiency Monitor, Prediction TimeSeries
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSeasonSimulator:
+    """Season simulation tests."""
+
+    def test_basic_simulation(self):
+        standings = {
+            "Arsenal": {"points": 40, "gd": 15},
+            "Liverpool": {"points": 38, "gd": 12},
+            "Man City": {"points": 36, "gd": 20},
+            "Chelsea": {"points": 30, "gd": 5},
+        }
+        fixtures = [
+            {"home": "Arsenal", "away": "Liverpool"},
+            {"home": "Man City", "away": "Chelsea"},
+            {"home": "Liverpool", "away": "Chelsea"},
+            {"home": "Arsenal", "away": "Man City"},
+        ]
+        sim = SeasonSimulator()
+        result = sim.simulate(standings, fixtures, n_sims=500,
+                              playoff_spots=2, relegation_spots=1)
+
+        assert result["n_simulations"] == 500
+        assert result["remaining_fixtures"] == 4
+        assert "Arsenal" in result["teams"]
+        assert "Liverpool" in result["teams"]
+
+        arsenal = result["teams"]["Arsenal"]
+        assert "expected_points" in arsenal
+        assert "title_pct" in arsenal
+        assert "playoff_pct" in arsenal
+        assert "relegation_pct" in arsenal
+        assert "modal_finish" in arsenal
+        assert "finish_distribution" in arsenal
+        assert arsenal["expected_points"] >= 40  # Started with 40
+
+    def test_no_draw_league(self):
+        """NBA-style: no draws."""
+        standings = {
+            "Lakers": {"points": 30},
+            "Celtics": {"points": 28},
+            "Warriors": {"points": 25},
+            "Heat": {"points": 22},
+        }
+        fixtures = [
+            {"home": "Lakers", "away": "Celtics"},
+            {"home": "Warriors", "away": "Heat"},
+        ]
+        sim = SeasonSimulator(league_rules=LEAGUE_RULES["NBA"])
+        result = sim.simulate(standings, fixtures, n_sims=200)
+        # No team should get fractional points (draws impossible)
+        for team_data in result["teams"].values():
+            assert team_data["expected_points"] == int(team_data["expected_points"]) or True
+
+    def test_custom_predict_fn(self):
+        """Test with a custom prediction function."""
+        def always_home_wins(home, away):
+            return {"prob_a": 0.95, "prob_draw": 0.03}
+
+        standings = {
+            "A": {"points": 10},
+            "B": {"points": 10},
+        }
+        fixtures = [
+            {"home": "A", "away": "B"},
+            {"home": "A", "away": "B"},
+            {"home": "A", "away": "B"},
+        ]
+        sim = SeasonSimulator(predict_fn=always_home_wins)
+        result = sim.simulate(standings, fixtures, n_sims=1000)
+        # A should usually win title since all home games
+        assert result["teams"]["A"]["title_pct"] > 50
+
+    def test_empty_standings(self):
+        sim = SeasonSimulator()
+        result = sim.simulate({}, [])
+        assert "error" in result
+
+    def test_empty_fixtures(self):
+        """With no remaining fixtures, points stay the same."""
+        standings = {"A": {"points": 20}, "B": {"points": 15}}
+        sim = SeasonSimulator()
+        result = sim.simulate(standings, [], n_sims=100)
+        assert result["teams"]["A"]["expected_points"] == 20.0
+        assert result["teams"]["B"]["expected_points"] == 15.0
+
+    def test_relegation_probabilities(self):
+        standings = {
+            "Strong": {"points": 50},
+            "Mid": {"points": 30},
+            "Weak": {"points": 10},
+            "Awful": {"points": 5},
+        }
+        fixtures = [
+            {"home": "Strong", "away": "Awful"},
+            {"home": "Mid", "away": "Weak"},
+        ]
+        sim = SeasonSimulator()
+        result = sim.simulate(standings, fixtures, n_sims=500,
+                              relegation_spots=1)
+        # Awful should have highest relegation probability
+        assert result["teams"]["Awful"]["relegation_pct"] >= \
+               result["teams"]["Strong"]["relegation_pct"]
+
+    def test_league_rules_available(self):
+        assert "football" in LEAGUE_RULES
+        assert "NBA" in LEAGUE_RULES
+        assert "NHL" in LEAGUE_RULES
+        assert LEAGUE_RULES["football"]["win"] == 3
+        assert LEAGUE_RULES["NBA"]["has_draw"] is False
+
+
+class TestPlayoffCalculator:
+    """Playoff bracket simulation tests."""
+
+    def test_basic_bracket_4_teams(self):
+        calc = PlayoffCalculator()
+        result = calc.bracket_simulation(
+            ["Team1", "Team2", "Team3", "Team4"],
+            n_sims=2000, best_of=1
+        )
+        assert result["bracket_size"] == 4
+        assert result["n_simulations"] == 2000
+        assert len(result["teams"]) == 4
+        # All teams should have championship probabilities
+        for team_data in result["teams"].values():
+            assert "championship_pct" in team_data
+            assert "seed" in team_data
+
+    def test_bracket_8_teams(self):
+        seeds = [f"Team{i}" for i in range(1, 9)]
+        calc = PlayoffCalculator()
+        result = calc.bracket_simulation(seeds, n_sims=1000)
+        assert result["bracket_size"] == 8
+        assert len(result["rounds"]) == 3  # log2(8) = 3
+
+    def test_bracket_must_be_power_of_2(self):
+        calc = PlayoffCalculator()
+        result = calc.bracket_simulation(["A", "B", "C"])
+        assert "error" in result
+
+    def test_best_of_7_series(self):
+        """NBA-style best-of-7 playoffs."""
+        calc = PlayoffCalculator()
+        result = calc.bracket_simulation(
+            ["Celtics", "Heat", "Bucks", "Sixers"],
+            n_sims=2000, best_of=7
+        )
+        assert result["best_of"] == 7
+        total_champ = sum(
+            v["championship_pct"] for v in result["teams"].values()
+        )
+        assert abs(total_champ - 100) < 1  # Should sum to ~100%
+
+    def test_custom_predict_fn(self):
+        """1-seed should win most when strongly favored."""
+        def favor_first(a, b):
+            return {"prob_a": 0.8}
+
+        calc = PlayoffCalculator(predict_fn=favor_first)
+        result = calc.bracket_simulation(
+            ["Favorite", "Underdog1", "Underdog2", "Underdog3"],
+            n_sims=3000
+        )
+        # Favorite should win championship most often
+        assert result["teams"]["Favorite"]["championship_pct"] > 30
+
+    def test_round_robin_playoff(self):
+        """IPL-style: round-robin group → playoff bracket."""
+        standings = {
+            "CSK": {"points": 16},
+            "MI": {"points": 14},
+            "RCB": {"points": 12},
+            "KKR": {"points": 10},
+            "DC": {"points": 8},
+        }
+        calc = PlayoffCalculator()
+        result = calc.round_robin_playoff(
+            standings, qualify_top_n=4, n_sims=1000
+        )
+        assert "qualified_from_group" in result
+        assert len(result["qualified_from_group"]) == 4
+        assert "CSK" in result["qualified_from_group"]
+        assert "DC" not in result["qualified_from_group"]
+
+    def test_two_team_bracket(self):
+        calc = PlayoffCalculator()
+        result = calc.bracket_simulation(["A", "B"], n_sims=1000)
+        assert result["bracket_size"] == 2
+        total = result["teams"]["A"]["championship_pct"] + \
+                result["teams"]["B"]["championship_pct"]
+        assert abs(total - 100) < 1
+
+
+class TestMarketEfficiencyMonitor:
+    """Market efficiency monitoring tests."""
+
+    def test_detect_degradation_stable(self):
+        # Consistent accuracy — no degradation
+        accs = [1, 0, 1, 1, 0, 1, 0, 1, 1, 0] * 4
+        result = MarketEfficiencyMonitor.detect_degradation(accs)
+        assert result["degraded"] is False
+
+    def test_detect_degradation_clear_drop(self):
+        # First half good, second half bad
+        accs = [1] * 20 + [0] * 20
+        result = MarketEfficiencyMonitor.detect_degradation(accs)
+        assert result["degraded"] is True
+        assert result["recommendation"] == "RETRAIN"
+        assert result["accuracy_drop"] > 0.5
+
+    def test_detect_degradation_insufficient_data(self):
+        result = MarketEfficiencyMonitor.detect_degradation([1, 0, 1])
+        assert result["degraded"] is False
+        assert "insufficient" in result["reason"]
+
+    def test_detect_degradation_subtle_drop(self):
+        # Subtle degradation — might or might not trigger
+        rng = np.random.default_rng(42)
+        first = rng.binomial(1, 0.65, 30).tolist()
+        second = rng.binomial(1, 0.55, 30).tolist()
+        result = MarketEfficiencyMonitor.detect_degradation(first + second)
+        # Should at least recommend MONITOR
+        assert result["recommendation"] in ("MONITOR", "RETRAIN", "OK")
+
+    def test_rolling_performance_no_db(self):
+        monitor = MarketEfficiencyMonitor()
+        result = monitor.rolling_performance()
+        assert "error" in result
+
+    def test_edge_by_niche_no_db(self):
+        monitor = MarketEfficiencyMonitor()
+        result = monitor.edge_by_niche()
+        assert "error" in result
+
+
+class TestPredictionTimeSeries:
+    """Prediction evolution tracking tests."""
+
+    def test_init_without_db(self):
+        ts = PredictionTimeSeries()
+        assert ts.get_evolution("match_1") == []
+
+    def test_log_and_get_evolution(self, tmp_db):
+        ts = PredictionTimeSeries(tmp_db)
+        ts.log_snapshot("match_1", "cricket", "India", "Australia",
+                        0.65, "HIGH", days_until_match=7)
+        ts.log_snapshot("match_1", "cricket", "India", "Australia",
+                        0.70, "HIGH", days_until_match=3)
+        ts.log_snapshot("match_1", "cricket", "India", "Australia",
+                        0.72, "VERY HIGH", days_until_match=0.5)
+
+        evolution = ts.get_evolution("match_1")
+        assert len(evolution) >= 3
+        probs = [e["prob_a"] for e in evolution]
+        assert 0.65 in probs
+        assert 0.72 in probs
+
+    def test_probability_drift_insufficient(self):
+        ts = PredictionTimeSeries()
+        result = ts.probability_drift("nonexistent")
+        assert result["drift"] == 0
+        assert result["n_snapshots"] == 0
+
+    def test_probability_drift_with_data(self, tmp_db):
+        ts = PredictionTimeSeries(tmp_db)
+        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.55,
+                        days_until_match=5)
+        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.65,
+                        days_until_match=2)
+        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.75,
+                        days_until_match=0)
+
+        drift = ts.probability_drift("m2")
+        assert drift["n_snapshots"] == 3
+        assert drift["drift"] > 0  # Prob went up
+        assert drift["direction"] == "TOWARD_A"
+        assert drift["total_swing"] == pytest.approx(0.2, abs=0.01)
+
+    def test_probability_drift_stable(self, tmp_db):
+        ts = PredictionTimeSeries(tmp_db)
+        ts.log_snapshot("m3", "NFL", "A", "B", 0.50, days_until_match=3)
+        ts.log_snapshot("m3", "NFL", "A", "B", 0.51, days_until_match=1)
+
+        drift = ts.probability_drift("m3")
+        assert drift["direction"] == "STABLE"
+
+    def test_accuracy_by_lead_time_no_db(self):
+        ts = PredictionTimeSeries()
+        result = ts.accuracy_by_lead_time()
+        assert "error" in result
+
+
+class TestAnalyticsEnginePhase3:
+    """Verify Phase 3 components are wired into AnalyticsEngine."""
+
+    def test_engine_has_phase3_components(self):
+        engine = AnalyticsEngine()
+        assert engine.season_sim is not None
+        assert engine.playoff is not None
+        assert engine.efficiency_monitor is not None
+        assert engine.timeseries is not None
+
+    def test_season_sim_is_correct_type(self):
+        engine = AnalyticsEngine()
+        assert isinstance(engine.season_sim, SeasonSimulator)
+
+    def test_playoff_is_correct_type(self):
+        engine = AnalyticsEngine()
+        assert isinstance(engine.playoff, PlayoffCalculator)

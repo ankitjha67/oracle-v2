@@ -1045,11 +1045,678 @@ class RatingChangePointDetector:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 9. ANALYTICS ENGINE — Coordinator that ties everything together
+# 9. SEASON SIMULATOR (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Default league rules for points-based leagues
+LEAGUE_RULES: dict[str, dict] = {
+    "football": {"win": 3, "draw": 1, "loss": 0, "has_draw": True},
+    "EPL": {"win": 3, "draw": 1, "loss": 0, "has_draw": True},
+    "La Liga": {"win": 3, "draw": 1, "loss": 0, "has_draw": True},
+    "Serie A": {"win": 3, "draw": 1, "loss": 0, "has_draw": True},
+    "Bundesliga": {"win": 3, "draw": 1, "loss": 0, "has_draw": True},
+    "Ligue 1": {"win": 3, "draw": 1, "loss": 0, "has_draw": True},
+    "MLS": {"win": 3, "draw": 1, "loss": 0, "has_draw": True},
+    "NBA": {"win": 1, "draw": 0, "loss": 0, "has_draw": False},
+    "NHL": {"win": 2, "draw": 0, "loss": 0, "has_draw": False, "otl": 1},
+    "MLB": {"win": 1, "draw": 0, "loss": 0, "has_draw": False},
+    "NFL": {"win": 1, "draw": 0, "loss": 0, "has_draw": False},
+    "cricket": {"win": 2, "draw": 0, "loss": 0, "has_draw": False},
+    "IPL": {"win": 2, "draw": 0, "loss": 0, "has_draw": False},
+}
+
+
+class SeasonSimulator:
+    """Monte Carlo remaining-season simulator.
+
+    Given current standings and remaining fixtures, simulates the rest of the
+    season N times using a prediction function. Outputs finish-position
+    distributions, playoff odds, and relegation risk for every team.
+
+    Works for any league format: football (W/D/L), basketball (W/L), cricket.
+    """
+
+    def __init__(self, predict_fn=None, league_rules: dict = None):
+        """
+        predict_fn: callable(team_a, team_b, **ctx) -> dict with keys:
+            prob_a: float (0-1), prob_draw: float (0-1, optional)
+        league_rules: {"win": 3, "draw": 1, "loss": 0, "has_draw": True}
+        """
+        self.predict_fn = predict_fn
+        self.rules = league_rules or LEAGUE_RULES["football"]
+
+    def simulate(self, standings: dict, remaining_fixtures: list[dict],
+                 n_sims: int = 5000, playoff_spots: int = 4,
+                 relegation_spots: int = 3,
+                 seed: int = 42) -> dict:
+        """Run Monte Carlo simulation of remaining season.
+
+        standings: {team: {"points": int, "gd": int (optional), ...}}
+        remaining_fixtures: [{"home": str, "away": str, ...}]
+        playoff_spots: top N qualify for playoffs/champions league
+        relegation_spots: bottom N get relegated (0 to disable)
+
+        Returns per-team distributions of finish position, points, playoff/
+        relegation probabilities, and expected final points.
+        """
+        teams = sorted(standings.keys())
+        n_teams = len(teams)
+        if n_teams == 0:
+            return {"error": "no teams in standings"}
+
+        rng = np.random.default_rng(seed)
+
+        # Pre-compute predictions for all remaining fixtures
+        fixture_probs = []
+        for fix in remaining_fixtures:
+            home = fix.get("home", fix.get("team_a", ""))
+            away = fix.get("away", fix.get("team_b", ""))
+            if not home or not away:
+                continue
+
+            if self.predict_fn:
+                pred = self.predict_fn(home, away)
+                prob_a = pred.get("prob_a", 0.5)
+                prob_draw = pred.get("prob_draw", 0.0)
+                if not self.rules.get("has_draw"):
+                    prob_draw = 0.0
+            else:
+                # Default: slight home advantage
+                prob_a = 0.45
+                prob_draw = 0.25 if self.rules.get("has_draw") else 0.0
+
+            # Ensure probabilities sum to 1
+            prob_b = max(0, 1.0 - prob_a - prob_draw)
+            fixture_probs.append({
+                "home": home, "away": away,
+                "prob_home": prob_a, "prob_draw": prob_draw, "prob_away": prob_b,
+            })
+
+        # Initialize accumulators
+        finish_counts = {t: np.zeros(n_teams, dtype=int) for t in teams}
+        total_points = {t: [] for t in teams}
+
+        for _ in range(n_sims):
+            # Start from current standings
+            sim_points = {t: standings[t].get("points", 0) for t in teams}
+            sim_gd = {t: standings[t].get("gd", 0) for t in teams}
+
+            # Simulate each remaining fixture
+            for fp in fixture_probs:
+                r = rng.random()
+                home, away = fp["home"], fp["away"]
+                if r < fp["prob_home"]:
+                    # Home win
+                    if home in sim_points:
+                        sim_points[home] += self.rules["win"]
+                        sim_gd[home] = sim_gd.get(home, 0) + 1
+                    if away in sim_points:
+                        sim_points[away] += self.rules["loss"]
+                        sim_gd[away] = sim_gd.get(away, 0) - 1
+                elif r < fp["prob_home"] + fp["prob_draw"]:
+                    # Draw
+                    if home in sim_points:
+                        sim_points[home] += self.rules.get("draw", 1)
+                    if away in sim_points:
+                        sim_points[away] += self.rules.get("draw", 1)
+                else:
+                    # Away win
+                    if away in sim_points:
+                        sim_points[away] += self.rules["win"]
+                        sim_gd[away] = sim_gd.get(away, 0) + 1
+                    if home in sim_points:
+                        sim_points[home] += self.rules["loss"]
+                        sim_gd[home] = sim_gd.get(home, 0) - 1
+
+            # Determine final standings (sort by points, then GD)
+            sorted_teams = sorted(
+                teams,
+                key=lambda t: (sim_points.get(t, 0), sim_gd.get(t, 0)),
+                reverse=True,
+            )
+            for pos, t in enumerate(sorted_teams):
+                finish_counts[t][pos] += 1
+                total_points[t].append(sim_points.get(t, 0))
+
+        # Build results
+        results = {}
+        for t in teams:
+            pts_arr = np.array(total_points[t])
+            positions = finish_counts[t]
+
+            # Playoff probability: finish in top N
+            playoff_pct = float(np.sum(positions[:playoff_spots]) / n_sims * 100)
+
+            # Relegation probability: finish in bottom N
+            relegation_pct = 0.0
+            if relegation_spots > 0:
+                relegation_pct = float(
+                    np.sum(positions[-relegation_spots:]) / n_sims * 100
+                )
+
+            # Title probability
+            title_pct = float(positions[0] / n_sims * 100)
+
+            # Most likely finish position
+            modal_finish = int(np.argmax(positions)) + 1
+
+            results[t] = {
+                "expected_points": round(float(np.mean(pts_arr)), 1),
+                "points_p5": round(float(np.percentile(pts_arr, 5)), 1),
+                "points_p25": round(float(np.percentile(pts_arr, 25)), 1),
+                "points_median": round(float(np.median(pts_arr)), 1),
+                "points_p75": round(float(np.percentile(pts_arr, 75)), 1),
+                "points_p95": round(float(np.percentile(pts_arr, 95)), 1),
+                "title_pct": round(title_pct, 1),
+                "playoff_pct": round(playoff_pct, 1),
+                "relegation_pct": round(relegation_pct, 1),
+                "modal_finish": modal_finish,
+                "finish_distribution": {
+                    str(pos + 1): round(float(positions[pos] / n_sims * 100), 1)
+                    for pos in range(n_teams)
+                    if positions[pos] > 0
+                },
+            }
+
+        # Sort by expected points descending
+        results = dict(sorted(
+            results.items(), key=lambda x: -x[1]["expected_points"]
+        ))
+
+        return {
+            "n_simulations": n_sims,
+            "remaining_fixtures": len(fixture_probs),
+            "playoff_spots": playoff_spots,
+            "relegation_spots": relegation_spots,
+            "teams": results,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 10. PLAYOFF CALCULATOR (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class PlayoffCalculator:
+    """Conditional playoff and championship probability calculator.
+
+    Supports seeded brackets (NBA, NFL), round-robin+playoff (IPL, CPL),
+    and knockout tournaments (UCL). Computes P(advance each round)
+    and P(championship) for every team.
+    """
+
+    def __init__(self, predict_fn=None):
+        """
+        predict_fn: callable(team_a, team_b) -> dict with prob_a: float
+        """
+        self.predict_fn = predict_fn
+
+    def bracket_simulation(self, seeds: list[str],
+                           n_sims: int = 10000,
+                           best_of: int = 1,
+                           seed: int = 42) -> dict:
+        """Simulate a seeded bracket tournament.
+
+        seeds: ordered list of teams by seed (index 0 = 1-seed).
+               Length must be a power of 2.
+        best_of: number of games per series (1 for single elimination,
+                 7 for NBA/NHL, 5 for MLB)
+
+        Returns per-team probability of reaching each round + championship.
+        """
+        n = len(seeds)
+        if n < 2 or (n & (n - 1)) != 0:
+            return {"error": f"bracket size must be power of 2, got {n}"}
+
+        n_rounds = int(math.log2(n))
+        rng = np.random.default_rng(seed)
+
+        # Track per-team round advancement counts
+        round_names = [f"round_{r+1}" for r in range(n_rounds)]
+        round_names[-1] = "championship"
+        if n_rounds >= 2:
+            round_names[-2] = "finals"
+        if n_rounds >= 3:
+            round_names[-3] = "semifinals"
+
+        advancement = {t: {rn: 0 for rn in round_names} for t in seeds}
+
+        for _ in range(n_sims):
+            bracket = list(seeds)  # current round participants
+
+            for r_idx, rn in enumerate(round_names):
+                next_round = []
+                for i in range(0, len(bracket), 2):
+                    if i + 1 >= len(bracket):
+                        next_round.append(bracket[i])
+                        advancement[bracket[i]][rn] += 1
+                        continue
+
+                    team_a, team_b = bracket[i], bracket[i + 1]
+                    winner = self._simulate_series(
+                        team_a, team_b, best_of, rng
+                    )
+                    advancement[winner][rn] += 1
+                    next_round.append(winner)
+
+                bracket = next_round
+
+        # Convert counts to percentages
+        results = {}
+        for team in seeds:
+            team_result = {
+                "seed": seeds.index(team) + 1,
+            }
+            for rn in round_names:
+                team_result[f"{rn}_pct"] = round(
+                    advancement[team][rn] / n_sims * 100, 1
+                )
+            results[team] = team_result
+
+        # Sort by championship probability
+        results = dict(sorted(
+            results.items(),
+            key=lambda x: -x[1].get("championship_pct", 0)
+        ))
+
+        return {
+            "n_simulations": n_sims,
+            "bracket_size": n,
+            "best_of": best_of,
+            "rounds": round_names,
+            "teams": results,
+        }
+
+    def _simulate_series(self, team_a: str, team_b: str,
+                         best_of: int, rng) -> str:
+        """Simulate a single series between two teams."""
+        if self.predict_fn:
+            pred = self.predict_fn(team_a, team_b)
+            prob_a = pred.get("prob_a", 0.5)
+        else:
+            prob_a = 0.5
+
+        if best_of == 1:
+            return team_a if rng.random() < prob_a else team_b
+
+        # Best-of-N series
+        wins_needed = (best_of + 1) // 2
+        wins_a, wins_b = 0, 0
+        for _ in range(best_of):
+            if rng.random() < prob_a:
+                wins_a += 1
+            else:
+                wins_b += 1
+            if wins_a >= wins_needed:
+                return team_a
+            if wins_b >= wins_needed:
+                return team_b
+
+        return team_a if wins_a > wins_b else team_b
+
+    def round_robin_playoff(self, group_standings: dict,
+                            qualify_top_n: int = 4,
+                            best_of: int = 1,
+                            n_sims: int = 10000,
+                            seed: int = 42) -> dict:
+        """IPL/CPL-style: top N from group stage into playoff bracket.
+
+        group_standings: {team: {"points": int, ...}} — already resolved
+        qualify_top_n: how many advance to playoffs
+        """
+        sorted_teams = sorted(
+            group_standings.keys(),
+            key=lambda t: group_standings[t].get("points", 0),
+            reverse=True,
+        )[:qualify_top_n]
+
+        # Pad to power of 2 if needed
+        bracket_size = 1
+        while bracket_size < len(sorted_teams):
+            bracket_size *= 2
+        while len(sorted_teams) < bracket_size:
+            sorted_teams.append(f"BYE_{len(sorted_teams)}")
+
+        result = self.bracket_simulation(
+            sorted_teams, n_sims=n_sims, best_of=best_of, seed=seed
+        )
+        # Remove BYE teams from output
+        if "teams" in result:
+            result["teams"] = {
+                k: v for k, v in result["teams"].items()
+                if not k.startswith("BYE_")
+            }
+        result["qualified_from_group"] = [
+            t for t in sorted_teams if not t.startswith("BYE_")
+        ]
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 11. MARKET EFFICIENCY MONITOR (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class MarketEfficiencyMonitor:
+    """Continuous monitoring of where the model has persistent edge.
+
+    Tracks rolling CLV, ROI, and accuracy over time windows.
+    Detects model degradation and identifies most profitable niches.
+    """
+
+    def __init__(self, db=None):
+        self.db = db
+
+    def rolling_performance(self, sport: str = None,
+                            window_sizes: list[int] = None,
+                            n: int = 1000) -> dict:
+        """Compute rolling accuracy, Brier, and CLV over multiple windows.
+
+        window_sizes: list of window sizes in number of predictions.
+        Returns time-series of performance metrics.
+        """
+        if not self.db:
+            return {"error": "no database"}
+
+        if window_sizes is None:
+            window_sizes = [20, 50, 100]
+
+        conn = self.db._get_conn()
+        q = "SELECT * FROM predictions WHERE is_correct >= 0"
+        params: list = []
+        if sport:
+            q += " AND sport=?"
+            params.append(sport)
+        q += " ORDER BY created_at ASC LIMIT ?"
+        params.append(n)
+        rows = conn.execute(q, params).fetchall()
+        preds = [dict(r) for r in rows]
+
+        if len(preds) < 5:
+            return {"error": "insufficient predictions", "n": len(preds)}
+
+        probs = np.array([p["prob_a"] for p in preds])
+        actuals = np.array([p["is_correct"] for p in preds])
+
+        result = {"n_predictions": len(preds), "windows": {}}
+
+        for w in window_sizes:
+            if len(preds) < w:
+                continue
+
+            window_data = []
+            for i in range(w, len(preds) + 1):
+                window_probs = probs[i - w:i]
+                window_actuals = actuals[i - w:i]
+
+                acc = float(np.mean(
+                    (window_probs > 0.5).astype(int) == window_actuals
+                ))
+                brier = float(np.mean((window_probs - window_actuals) ** 2))
+
+                window_data.append({
+                    "end_index": i,
+                    "accuracy": round(acc, 4),
+                    "brier_score": round(brier, 4),
+                })
+
+            result["windows"][str(w)] = {
+                "current": window_data[-1] if window_data else None,
+                "best": min(window_data, key=lambda x: x["brier_score"])
+                    if window_data else None,
+                "worst": max(window_data, key=lambda x: x["brier_score"])
+                    if window_data else None,
+                "n_windows": len(window_data),
+            }
+
+        return result
+
+    @staticmethod
+    def detect_degradation(accuracies: list[float],
+                           threshold: float = 0.05,
+                           min_window: int = 10) -> dict:
+        """Detect if model performance is degrading.
+
+        Compares first half vs second half of recent accuracy sequence.
+        Flags degradation if second half is significantly worse.
+        """
+        if len(accuracies) < min_window * 2:
+            return {"degraded": False, "reason": "insufficient data",
+                    "n": len(accuracies)}
+
+        mid = len(accuracies) // 2
+        first_half = np.array(accuracies[:mid])
+        second_half = np.array(accuracies[mid:])
+
+        first_mean = float(np.mean(first_half))
+        second_mean = float(np.mean(second_half))
+        drop = first_mean - second_mean
+
+        # Simple z-test for difference in proportions
+        pooled = float(np.mean(accuracies))
+        se = math.sqrt(pooled * (1 - pooled) * (1 / mid + 1 / (len(accuracies) - mid)))
+        z_score = drop / se if se > 0 else 0
+
+        return {
+            "degraded": drop > threshold and z_score > 1.96,
+            "first_half_accuracy": round(first_mean, 4),
+            "second_half_accuracy": round(second_mean, 4),
+            "accuracy_drop": round(drop, 4),
+            "z_score": round(z_score, 2),
+            "recommendation": "RETRAIN" if drop > threshold and z_score > 1.96
+                             else "MONITOR" if drop > threshold / 2
+                             else "OK",
+        }
+
+    def edge_by_niche(self, n: int = 500) -> dict:
+        """Find the most profitable sport/confidence niches.
+
+        Returns Sharpe-ratio-sorted niches where Oracle has persistent edge.
+        """
+        if not self.db:
+            return {"error": "no database"}
+
+        conn = self.db._get_conn()
+        rows = conn.execute("""
+            SELECT sport, confidence, prob_a, is_correct
+            FROM predictions WHERE is_correct >= 0
+            ORDER BY created_at DESC LIMIT ?
+        """, (n,)).fetchall()
+
+        if not rows:
+            return {"error": "no scored predictions"}
+
+        # Group by sport x confidence
+        niches: dict[str, list] = defaultdict(list)
+        for r in rows:
+            key = f"{r['sport']}:{r['confidence']}"
+            predicted_correct = (r["prob_a"] > 0.5 and r["is_correct"] == 1) or \
+                                (r["prob_a"] <= 0.5 and r["is_correct"] == 0)
+            niches[key].append(1 if predicted_correct else 0)
+
+        results = {}
+        for niche, outcomes in niches.items():
+            if len(outcomes) < 5:
+                continue
+            arr = np.array(outcomes, dtype=float)
+            acc = float(np.mean(arr))
+            std = float(np.std(arr))
+            # Sharpe-like: (accuracy - 0.5) / std
+            sharpe = (acc - 0.5) / std if std > 0 else 0
+
+            sport, confidence = niche.split(":", 1)
+            results[niche] = {
+                "sport": sport,
+                "confidence": confidence,
+                "n": len(outcomes),
+                "accuracy": round(acc, 4),
+                "sharpe": round(sharpe, 3),
+                "profitable": acc > 0.52,  # Need >52% to beat vig
+            }
+
+        # Sort by Sharpe ratio
+        return dict(sorted(results.items(), key=lambda x: -x[1]["sharpe"]))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 12. PREDICTION TIME SERIES (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class PredictionTimeSeries:
+    """Track how prediction probabilities evolve over time for a match.
+
+    Stores snapshots each time a prediction is re-run (e.g., daily),
+    enabling line-movement analysis and early-vs-late accuracy comparison.
+    """
+
+    def __init__(self, db=None):
+        self.db = db
+        if db:
+            self._ensure_schema()
+
+    def _ensure_schema(self):
+        with self.db.transaction() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS prediction_timeseries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id TEXT NOT NULL,
+                    sport TEXT DEFAULT '',
+                    team_a TEXT DEFAULT '',
+                    team_b TEXT DEFAULT '',
+                    prediction_timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                    days_until_match REAL DEFAULT 0,
+                    prob_a REAL,
+                    prob_draw REAL DEFAULT 0,
+                    confidence TEXT DEFAULT '',
+                    model_agreement REAL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_pts_match
+                    ON prediction_timeseries(match_id);
+                CREATE INDEX IF NOT EXISTS idx_pts_sport
+                    ON prediction_timeseries(sport);
+            """)
+
+    def log_snapshot(self, match_id: str, sport: str,
+                     team_a: str, team_b: str,
+                     prob_a: float, confidence: str = "",
+                     prob_draw: float = 0, model_agreement: float = 0,
+                     days_until_match: float = 0):
+        """Record a prediction snapshot."""
+        if not self.db:
+            return
+        with self.db.transaction() as conn:
+            conn.execute("""
+                INSERT INTO prediction_timeseries
+                (match_id, sport, team_a, team_b, prob_a, prob_draw,
+                 confidence, model_agreement, days_until_match)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (match_id, sport, team_a, team_b, prob_a, prob_draw,
+                  confidence, model_agreement, days_until_match))
+
+    def get_evolution(self, match_id: str) -> list[dict]:
+        """Get the probability evolution timeline for a match."""
+        if not self.db:
+            return []
+        conn = self.db._get_conn()
+        rows = conn.execute("""
+            SELECT * FROM prediction_timeseries
+            WHERE match_id=?
+            ORDER BY created_at ASC
+        """, (match_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def probability_drift(self, match_id: str) -> dict:
+        """Analyze how much the prediction drifted over time.
+
+        Returns earliest, latest, max swing, and direction of drift.
+        """
+        snapshots = self.get_evolution(match_id)
+        if len(snapshots) < 2:
+            return {"match_id": match_id, "n_snapshots": len(snapshots),
+                    "drift": 0}
+
+        probs = [s["prob_a"] for s in snapshots]
+        earliest = probs[0]
+        latest = probs[-1]
+
+        return {
+            "match_id": match_id,
+            "n_snapshots": len(snapshots),
+            "earliest_prob_a": round(earliest, 4),
+            "latest_prob_a": round(latest, 4),
+            "drift": round(latest - earliest, 4),
+            "max_prob_a": round(max(probs), 4),
+            "min_prob_a": round(min(probs), 4),
+            "total_swing": round(max(probs) - min(probs), 4),
+            "direction": "TOWARD_A" if latest > earliest + 0.05
+                        else "TOWARD_B" if latest < earliest - 0.05
+                        else "STABLE",
+        }
+
+    def accuracy_by_lead_time(self, sport: str = None,
+                              n: int = 500) -> dict:
+        """Compare prediction accuracy at different lead times.
+
+        Are predictions made 7 days before more or less accurate
+        than predictions made 1 day before?
+        """
+        if not self.db:
+            return {"error": "no database"}
+
+        conn = self.db._get_conn()
+        q = """
+            SELECT ts.match_id, ts.prob_a, ts.days_until_match,
+                   p.is_correct
+            FROM prediction_timeseries ts
+            JOIN predictions p ON ts.match_id = p.id
+            WHERE p.is_correct >= 0
+        """
+        params: list = []
+        if sport:
+            q += " AND ts.sport=?"
+            params.append(sport)
+        q += " ORDER BY ts.created_at DESC LIMIT ?"
+        params.append(n)
+
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            return {"error": "no matched predictions"}
+
+        # Bucket by lead time
+        buckets: dict[str, list] = defaultdict(list)
+        for r in rows:
+            days = r["days_until_match"]
+            if days >= 7:
+                bucket = "7d+"
+            elif days >= 3:
+                bucket = "3-7d"
+            elif days >= 1:
+                bucket = "1-3d"
+            else:
+                bucket = "<1d"
+
+            predicted_correct = (
+                (r["prob_a"] > 0.5 and r["is_correct"] == 1) or
+                (r["prob_a"] <= 0.5 and r["is_correct"] == 0)
+            )
+            buckets[bucket].append(1 if predicted_correct else 0)
+
+        result = {}
+        for bucket, outcomes in sorted(buckets.items()):
+            arr = np.array(outcomes, dtype=float)
+            result[bucket] = {
+                "n": len(outcomes),
+                "accuracy": round(float(np.mean(arr)), 4),
+            }
+
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 13. ANALYTICS ENGINE — Coordinator that ties everything together
 # ═══════════════════════════════════════════════════════════════════════════
 
 class AnalyticsEngine:
-    """Top-level coordinator for all analytics (Phase 1 + Phase 2)."""
+    """Top-level coordinator for all analytics (Phase 1 + Phase 2 + Phase 3)."""
 
     def __init__(self, db=None):
         self.db = db
@@ -1063,6 +1730,11 @@ class AnalyticsEngine:
         # Phase 2
         self.shap = SHAPExplainer()
         self.changepoint = RatingChangePointDetector(db)
+        # Phase 3
+        self.season_sim = SeasonSimulator()
+        self.playoff = PlayoffCalculator()
+        self.efficiency_monitor = MarketEfficiencyMonitor(db)
+        self.timeseries = PredictionTimeSeries(db)
 
     def analyze_prediction(self, prediction: dict,
                            market_odds: dict = None) -> dict:
