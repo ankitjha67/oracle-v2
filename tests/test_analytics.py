@@ -625,9 +625,10 @@ class TestSeasonSimulator:
         ]
         sim = SeasonSimulator(league_rules=LEAGUE_RULES["NBA"])
         result = sim.simulate(standings, fixtures, n_sims=200)
-        # No team should get fractional points (draws impossible)
-        for team_data in result["teams"].values():
-            assert team_data["expected_points"] == int(team_data["expected_points"]) or True
+        # expected_points is an average across simulations, so it can be fractional
+        # but each team should have gained points (at least their starting total)
+        for team, team_data in result["teams"].items():
+            assert team_data["expected_points"] >= standings[team]["points"]
 
     def test_custom_predict_fn(self):
         """Test with a custom prediction function."""
