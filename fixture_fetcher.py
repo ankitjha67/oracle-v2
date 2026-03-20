@@ -115,7 +115,7 @@ def fetch_upcoming_football(leagues=None):
     if leagues is None: leagues=FOOTBALL_LEAGUES
     all_matches=[]; today=datetime.now().strftime("%Y%m%d"); seen=set()
     for lg,path in leagues.items():
-        for days in [0,3,7]:
+        for days in range(8):
             dt=(datetime.now()+timedelta(days=days)).strftime("%Y%m%d")
             data=_fetch(f"{ESPN}/{path}/scoreboard?dates={dt}",f"espn_{lg}_{dt}",1 if days==0 else 6)
             if not data: continue
