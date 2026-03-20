@@ -4,10 +4,15 @@ Parses 3,196 T20I matches ball-by-ball to auto-generate player stats.
 Computes: batting avg/SR, bowling avg/econ/SR, phase splits, venue splits,
 vs-team records, recent form, impact ratings — for EVERY player.
 """
-import csv, os, json, math, glob, time
+
+import csv
+import glob
+import json
+import os
+import time
 from collections import defaultdict
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 DATA_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / "cricsheet_data"
 OUTPUT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -58,13 +63,14 @@ DOMESTIC_LEAGUES = {
 }
 
 
-def download_league_data(league_key: str, data_dir: str = None) -> str:
+def download_league_data(league_key: str, data_dir: str | None = None) -> str:
     """Download CricSheet data for a specific domestic T20 league.
 
     Returns the directory path where data was extracted.
     """
-    import requests
     import zipfile
+
+    import requests
 
     if league_key not in DOMESTIC_LEAGUES:
         print(f"  Unknown league: {league_key}. Available: {list(DOMESTIC_LEAGUES.keys())}")
@@ -112,70 +118,216 @@ def build_league_database(league_key: str, min_year: int = 2022) -> tuple[dict, 
 
 # T20 WC 2026 squads (all 8 Super 8 teams + 12 group stage teams = 20 teams)
 WC_SQUADS = {
-    "India": ["Abhishek Sharma","Sanju Samson","Ishan Kishan","Suryakumar Yadav",
-              "Tilak Varma","Hardik Pandya","Shivam Dube","Axar Patel",
-              "Varun Chakaravarthy","Arshdeep Singh","Jasprit Bumrah",
-              "Kuldeep Yadav","Washington Sundar","Rinku Singh","Mohammed Siraj"],
-    "New Zealand": ["Tim Seifert","Finn Allen","Rachin Ravindra","Glenn Phillips",
-                    "Mark Chapman","Daryl Mitchell","James Neesham","Mitchell Santner",
-                    "Cole McConchie","Matt Henry","Lockie Ferguson",
-                    "Jacob Duffy","Ish Sodhi","Adam Milne","Devon Conway"],
-    "England": ["Phil Salt","Harry Brook","Jacob Bethell","Jos Buttler","Ben Duckett",
-                "Will Jacks","Sam Curran","Rehan Ahmed","Adil Rashid","Jofra Archer",
-                "Mark Wood","Josh Tongue","Liam Dawson","Tom Banton","Brydon Carse"],
-    "South Africa": ["Quinton de Kock","Aiden Markram","Tristan Stubbs","Heinrich Klaasen",
-                     "David Miller","Dewald Brevis","Marco Jansen","Kagiso Rabada",
-                     "Anrich Nortje","Lungi Ngidi","Tabraiz Shamsi",
-                     "Keshav Maharaj","Corbin Bosch","Ryan Rickelton","George Linde"],
-    "West Indies": ["Brandon King","Johnson Charles","Shai Hope","Shimron Hetmyer",
-                    "Rovman Powell","Sherfane Rutherford","Roston Chase",
-                    "Romario Shepherd","Akeal Hosein","Gudakesh Motie",
-                    "Shamar Joseph","Jayden Seales","Jason Holder",
-                    "Matthew Forde","Quentin Sampson"],
-    "Pakistan": ["Babar Azam","Sahibzada Farhan","Fakhar Zaman","Mohammad Rizwan",
-                 "Salman Ali Agha","Shadab Khan","Faheem Ashraf","Shaheen Afridi",
-                 "Naseem Shah","Haris Rauf","Usman Tariq",
-                 "Imad Wasim","Mohammad Nawaz","Azam Khan","Iftikhar Ahmed"],
-    "Sri Lanka": ["Pathum Nissanka","Kusal Mendis","Charith Asalanka","Kamindu Mendis",
-                  "Dasun Shanaka","Wanindu Hasaranga","Maheesh Theekshana",
-                  "Dushmantha Chameera","Dushan Hemantha","Pavan Rathnayake",
-                  "Dunith Wellalage","Matheesha Pathirana","Bhanuka Rajapaksa",
-                  "Nuwan Thushara","Asitha Fernando"],
-    "Zimbabwe": ["Brian Bennett","Sikandar Raza","Craig Ervine","Sean Williams",
-                 "Tony Munyonga","Ryan Burl","Luke Jongwe","Blessing Muzarabani",
-                 "Tendai Chatara","Wellington Masakadza","Richard Ngarava",
-                 "Clive Madande","Milton Shumba","Dion Myers","Brad Evans"],
-    "Australia": ["Mitchell Marsh","Travis Head","Glenn Maxwell","David Warner",
-                  "Marcus Stoinis","Tim David","Matthew Wade","Pat Cummins",
-                  "Mitchell Starc","Adam Zampa","Josh Hazlewood",
-                  "Josh Inglis","Cameron Green","Ben Dwarshuis","Spencer Johnson"],
-    "Afghanistan": ["Rashid Khan","Ibrahim Zadran","Rahmanullah Gurbaz",
-                    "Najibullah Zadran","Mohammad Nabi","Azmatullah Omarzai",
-                    "Naveen-ul-Haq","Fazalhaq Farooqi","Gulbadin Naib",
-                    "Mujeeb Ur Rahman","Noor Ahmad","Karim Janat",
-                    "Hazratullah Zazai","Sediqullah Atal","Fareed Ahmad"],
+    "India": [
+        "Abhishek Sharma",
+        "Sanju Samson",
+        "Ishan Kishan",
+        "Suryakumar Yadav",
+        "Tilak Varma",
+        "Hardik Pandya",
+        "Shivam Dube",
+        "Axar Patel",
+        "Varun Chakaravarthy",
+        "Arshdeep Singh",
+        "Jasprit Bumrah",
+        "Kuldeep Yadav",
+        "Washington Sundar",
+        "Rinku Singh",
+        "Mohammed Siraj",
+    ],
+    "New Zealand": [
+        "Tim Seifert",
+        "Finn Allen",
+        "Rachin Ravindra",
+        "Glenn Phillips",
+        "Mark Chapman",
+        "Daryl Mitchell",
+        "James Neesham",
+        "Mitchell Santner",
+        "Cole McConchie",
+        "Matt Henry",
+        "Lockie Ferguson",
+        "Jacob Duffy",
+        "Ish Sodhi",
+        "Adam Milne",
+        "Devon Conway",
+    ],
+    "England": [
+        "Phil Salt",
+        "Harry Brook",
+        "Jacob Bethell",
+        "Jos Buttler",
+        "Ben Duckett",
+        "Will Jacks",
+        "Sam Curran",
+        "Rehan Ahmed",
+        "Adil Rashid",
+        "Jofra Archer",
+        "Mark Wood",
+        "Josh Tongue",
+        "Liam Dawson",
+        "Tom Banton",
+        "Brydon Carse",
+    ],
+    "South Africa": [
+        "Quinton de Kock",
+        "Aiden Markram",
+        "Tristan Stubbs",
+        "Heinrich Klaasen",
+        "David Miller",
+        "Dewald Brevis",
+        "Marco Jansen",
+        "Kagiso Rabada",
+        "Anrich Nortje",
+        "Lungi Ngidi",
+        "Tabraiz Shamsi",
+        "Keshav Maharaj",
+        "Corbin Bosch",
+        "Ryan Rickelton",
+        "George Linde",
+    ],
+    "West Indies": [
+        "Brandon King",
+        "Johnson Charles",
+        "Shai Hope",
+        "Shimron Hetmyer",
+        "Rovman Powell",
+        "Sherfane Rutherford",
+        "Roston Chase",
+        "Romario Shepherd",
+        "Akeal Hosein",
+        "Gudakesh Motie",
+        "Shamar Joseph",
+        "Jayden Seales",
+        "Jason Holder",
+        "Matthew Forde",
+        "Quentin Sampson",
+    ],
+    "Pakistan": [
+        "Babar Azam",
+        "Sahibzada Farhan",
+        "Fakhar Zaman",
+        "Mohammad Rizwan",
+        "Salman Ali Agha",
+        "Shadab Khan",
+        "Faheem Ashraf",
+        "Shaheen Afridi",
+        "Naseem Shah",
+        "Haris Rauf",
+        "Usman Tariq",
+        "Imad Wasim",
+        "Mohammad Nawaz",
+        "Azam Khan",
+        "Iftikhar Ahmed",
+    ],
+    "Sri Lanka": [
+        "Pathum Nissanka",
+        "Kusal Mendis",
+        "Charith Asalanka",
+        "Kamindu Mendis",
+        "Dasun Shanaka",
+        "Wanindu Hasaranga",
+        "Maheesh Theekshana",
+        "Dushmantha Chameera",
+        "Dushan Hemantha",
+        "Pavan Rathnayake",
+        "Dunith Wellalage",
+        "Matheesha Pathirana",
+        "Bhanuka Rajapaksa",
+        "Nuwan Thushara",
+        "Asitha Fernando",
+    ],
+    "Zimbabwe": [
+        "Brian Bennett",
+        "Sikandar Raza",
+        "Craig Ervine",
+        "Sean Williams",
+        "Tony Munyonga",
+        "Ryan Burl",
+        "Luke Jongwe",
+        "Blessing Muzarabani",
+        "Tendai Chatara",
+        "Wellington Masakadza",
+        "Richard Ngarava",
+        "Clive Madande",
+        "Milton Shumba",
+        "Dion Myers",
+        "Brad Evans",
+    ],
+    "Australia": [
+        "Mitchell Marsh",
+        "Travis Head",
+        "Glenn Maxwell",
+        "David Warner",
+        "Marcus Stoinis",
+        "Tim David",
+        "Matthew Wade",
+        "Pat Cummins",
+        "Mitchell Starc",
+        "Adam Zampa",
+        "Josh Hazlewood",
+        "Josh Inglis",
+        "Cameron Green",
+        "Ben Dwarshuis",
+        "Spencer Johnson",
+    ],
+    "Afghanistan": [
+        "Rashid Khan",
+        "Ibrahim Zadran",
+        "Rahmanullah Gurbaz",
+        "Najibullah Zadran",
+        "Mohammad Nabi",
+        "Azmatullah Omarzai",
+        "Naveen-ul-Haq",
+        "Fazalhaq Farooqi",
+        "Gulbadin Naib",
+        "Mujeeb Ur Rahman",
+        "Noor Ahmad",
+        "Karim Janat",
+        "Hazratullah Zazai",
+        "Sediqullah Atal",
+        "Fareed Ahmad",
+    ],
 }
 
 # Name matching aliases (CricSheet uses different name formats)
 NAME_ALIASES = {
-    "SKY": "Suryakumar Yadav", "SV Samson": "Sanju Samson",
-    "JJ Bumrah": "Jasprit Bumrah", "HH Pandya": "Hardik Pandya",
-    "Arshdeep Singh": "Arshdeep Singh", "RA Jadeja": "Ravindra Jadeja",
-    "KL Rahul": "KL Rahul", "V Kohli": "Virat Kohli", "RG Sharma": "Rohit Sharma",
-    "TA Boult": "Trent Boult", "MJ Santner": "Mitchell Santner",
-    "FH Allen": "Finn Allen", "TL Seifert": "Tim Seifert",
-    "GD Phillips": "Glenn Phillips", "DJ Mitchell": "Daryl Mitchell",
-    "HC Brook": "Harry Brook", "PD Salt": "Phil Salt",
-    "JC Buttler": "Jos Buttler", "JC Archer": "Jofra Archer",
-    "MA Wood": "Mark Wood", "AU Rashid": "Adil Rashid",
-    "Q de Kock": "Quinton de Kock", "AK Markram": "Aiden Markram",
-    "H Klaasen": "Heinrich Klaasen", "KG Rabada": "Kagiso Rabada",
-    "A Nortje": "Anrich Nortje", "M Jansen": "Marco Jansen",
-    "Babar Azam": "Babar Azam", "Shaheen Shah Afridi": "Shaheen Afridi",
-    "Mohammad Rizwan": "Mohammad Rizwan", "Shadab Khan": "Shadab Khan",
-    "Rashid Khan": "Rashid Khan", "Ibrahim Zadran": "Ibrahim Zadran",
+    "SKY": "Suryakumar Yadav",
+    "SV Samson": "Sanju Samson",
+    "JJ Bumrah": "Jasprit Bumrah",
+    "HH Pandya": "Hardik Pandya",
+    "Arshdeep Singh": "Arshdeep Singh",
+    "RA Jadeja": "Ravindra Jadeja",
+    "KL Rahul": "KL Rahul",
+    "V Kohli": "Virat Kohli",
+    "RG Sharma": "Rohit Sharma",
+    "TA Boult": "Trent Boult",
+    "MJ Santner": "Mitchell Santner",
+    "FH Allen": "Finn Allen",
+    "TL Seifert": "Tim Seifert",
+    "GD Phillips": "Glenn Phillips",
+    "DJ Mitchell": "Daryl Mitchell",
+    "HC Brook": "Harry Brook",
+    "PD Salt": "Phil Salt",
+    "JC Buttler": "Jos Buttler",
+    "JC Archer": "Jofra Archer",
+    "MA Wood": "Mark Wood",
+    "AU Rashid": "Adil Rashid",
+    "Q de Kock": "Quinton de Kock",
+    "AK Markram": "Aiden Markram",
+    "H Klaasen": "Heinrich Klaasen",
+    "KG Rabada": "Kagiso Rabada",
+    "A Nortje": "Anrich Nortje",
+    "M Jansen": "Marco Jansen",
+    "Babar Azam": "Babar Azam",
+    "Shaheen Shah Afridi": "Shaheen Afridi",
+    "Mohammad Rizwan": "Mohammad Rizwan",
+    "Shadab Khan": "Shadab Khan",
+    "Rashid Khan": "Rashid Khan",
+    "Ibrahim Zadran": "Ibrahim Zadran",
     "Rahmanullah Gurbaz": "Rahmanullah Gurbaz",
-    "P Nissanka": "Pathum Nissanka", "BKG Mendis": "Kusal Mendis",
+    "P Nissanka": "Pathum Nissanka",
+    "BKG Mendis": "Kusal Mendis",
     "W Hasaranga": "Wanindu Hasaranga",
 }
 
@@ -183,29 +335,49 @@ NAME_ALIASES = {
 def get_phase(ball_num: float) -> str:
     """Classify ball into T20 phase."""
     over = int(ball_num)
-    if over < 6: return "powerplay"
-    elif over < 15: return "middle"
-    else: return "death"
+    if over < 6:
+        return "powerplay"
+    elif over < 15:
+        return "middle"
+    else:
+        return "death"
 
 
 def parse_info_file(filepath: str) -> dict:
     """Parse match info CSV."""
-    info = {"teams": [], "date": "", "venue": "", "winner": "", "toss_winner": "",
-            "toss_decision": "", "season": "", "event": ""}
+    info = {
+        "teams": [],
+        "date": "",
+        "venue": "",
+        "winner": "",
+        "toss_winner": "",
+        "toss_decision": "",
+        "season": "",
+        "event": "",
+    }
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
             for row in csv.reader(f):
-                if len(row) < 3: continue
+                if len(row) < 3:
+                    continue
                 if row[0] == "info":
                     key, val = row[1], row[2]
-                    if key == "team": info["teams"].append(val)
-                    elif key == "date": info["date"] = val
-                    elif key == "venue": info["venue"] = val
-                    elif key == "winner": info["winner"] = val
-                    elif key == "toss_winner": info["toss_winner"] = val
-                    elif key == "toss_decision": info["toss_decision"] = val
-                    elif key == "season": info["season"] = val
-                    elif key == "event": info["event"] = val
+                    if key == "team":
+                        info["teams"].append(val)
+                    elif key == "date":
+                        info["date"] = val
+                    elif key == "venue":
+                        info["venue"] = val
+                    elif key == "winner":
+                        info["winner"] = val
+                    elif key == "toss_winner":
+                        info["toss_winner"] = val
+                    elif key == "toss_decision":
+                        info["toss_decision"] = val
+                    elif key == "season":
+                        info["season"] = val
+                    elif key == "event":
+                        info["event"] = val
     except Exception:
         pass
     return info
@@ -215,24 +387,26 @@ def parse_ball_data(filepath: str) -> list[dict]:
     """Parse ball-by-ball CSV."""
     balls = []
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    balls.append({
-                        "innings": int(row.get("innings", 0)),
-                        "ball": float(row.get("ball", 0)),
-                        "batting_team": row.get("batting_team", ""),
-                        "bowling_team": row.get("bowling_team", ""),
-                        "striker": row.get("striker", ""),
-                        "bowler": row.get("bowler", ""),
-                        "runs": int(row.get("runs_off_bat", 0)),
-                        "extras": int(row.get("extras", 0)),
-                        "wides": int(row.get("wides", 0) or 0),
-                        "noballs": int(row.get("noballs", 0) or 0),
-                        "wicket_type": row.get("wicket_type", ""),
-                        "dismissed": row.get("player_dismissed", ""),
-                    })
+                    balls.append(
+                        {
+                            "innings": int(row.get("innings", 0)),
+                            "ball": float(row.get("ball", 0)),
+                            "batting_team": row.get("batting_team", ""),
+                            "bowling_team": row.get("bowling_team", ""),
+                            "striker": row.get("striker", ""),
+                            "bowler": row.get("bowler", ""),
+                            "runs": int(row.get("runs_off_bat", 0)),
+                            "extras": int(row.get("extras", 0)),
+                            "wides": int(row.get("wides", 0) or 0),
+                            "noballs": int(row.get("noballs", 0) or 0),
+                            "wicket_type": row.get("wicket_type", ""),
+                            "dismissed": row.get("player_dismissed", ""),
+                        }
+                    )
                 except (ValueError, TypeError):
                     continue
     except Exception:
@@ -240,8 +414,7 @@ def parse_ball_data(filepath: str) -> list[dict]:
     return balls
 
 
-def build_player_database(data_dir: str, min_year: int = 2022,
-                          target_teams: dict = None) -> dict:
+def build_player_database(data_dir: str, min_year: int = 2022, target_teams: dict | None = None) -> dict:
     """
     Parse ALL CricSheet ball-by-ball data and build comprehensive player stats.
     Returns dict[player_name] -> full stats.
@@ -261,24 +434,37 @@ def build_player_database(data_dir: str, min_year: int = 2022,
             target_players.add(alias)
 
     # Stats accumulators
-    batting = defaultdict(lambda: {
-        "innings": 0, "runs": 0, "balls": 0, "dismissals": 0,
-        "fours": 0, "sixes": 0, "not_outs": 0,
-        "by_phase": defaultdict(lambda: {"runs": 0, "balls": 0}),
-        "by_venue": defaultdict(lambda: {"runs": 0, "balls": 0, "innings": 0}),
-        "by_opponent": defaultdict(lambda: {"runs": 0, "balls": 0, "innings": 0}),
-        "recent_scores": [],
-        "matches": set(),
-    })
+    batting = defaultdict(
+        lambda: {
+            "innings": 0,
+            "runs": 0,
+            "balls": 0,
+            "dismissals": 0,
+            "fours": 0,
+            "sixes": 0,
+            "not_outs": 0,
+            "by_phase": defaultdict(lambda: {"runs": 0, "balls": 0}),
+            "by_venue": defaultdict(lambda: {"runs": 0, "balls": 0, "innings": 0}),
+            "by_opponent": defaultdict(lambda: {"runs": 0, "balls": 0, "innings": 0}),
+            "recent_scores": [],
+            "matches": set(),
+        }
+    )
 
-    bowling = defaultdict(lambda: {
-        "balls": 0, "runs_conceded": 0, "wickets": 0, "wides": 0, "noballs": 0,
-        "by_phase": defaultdict(lambda: {"balls": 0, "runs": 0, "wickets": 0}),
-        "by_venue": defaultdict(lambda: {"balls": 0, "runs": 0, "wickets": 0}),
-        "by_opponent": defaultdict(lambda: {"balls": 0, "runs": 0, "wickets": 0}),
-        "recent_wickets": [],
-        "matches": set(),
-    })
+    bowling = defaultdict(
+        lambda: {
+            "balls": 0,
+            "runs_conceded": 0,
+            "wickets": 0,
+            "wides": 0,
+            "noballs": 0,
+            "by_phase": defaultdict(lambda: {"balls": 0, "runs": 0, "wickets": 0}),
+            "by_venue": defaultdict(lambda: {"balls": 0, "runs": 0, "wickets": 0}),
+            "by_opponent": defaultdict(lambda: {"balls": 0, "runs": 0, "wickets": 0}),
+            "recent_wickets": [],
+            "matches": set(),
+        }
+    )
 
     # Find all match files
     info_files = sorted(glob.glob(os.path.join(data_dir, "*_info.csv")))
@@ -335,9 +521,11 @@ def build_player_database(data_dir: str, min_year: int = 2022,
             bat["by_opponent"][opp_team_bat]["runs"] += b["runs"]
             bat["by_opponent"][opp_team_bat]["balls"] += 1
             match_bat_runs[striker] += b["runs"]
-            match_bat_balls[striker] += (1 if b["wides"] == 0 else 0)
-            if b["runs"] == 4: bat["fours"] += 1
-            if b["runs"] == 6: bat["sixes"] += 1
+            match_bat_balls[striker] += 1 if b["wides"] == 0 else 0
+            if b["runs"] == 4:
+                bat["fours"] += 1
+            if b["runs"] == 6:
+                bat["sixes"] += 1
 
             # Dismissal
             if b["dismissed"] and b["dismissed"] == striker:
@@ -358,7 +546,12 @@ def build_player_database(data_dir: str, min_year: int = 2022,
             bwl["by_opponent"][opp_team_bowl]["balls"] += legal
             bwl["by_opponent"][opp_team_bowl]["runs"] += b["runs"] + b["extras"]
 
-            if b["wicket_type"] and b["wicket_type"] not in ("run out", "retired hurt", "retired out", "obstructing the field"):
+            if b["wicket_type"] and b["wicket_type"] not in (
+                "run out",
+                "retired hurt",
+                "retired out",
+                "obstructing the field",
+            ):
                 bwl["wickets"] += 1
                 bwl["by_phase"][phase]["wickets"] += 1
                 bwl["by_venue"][venue]["wickets"] = bwl["by_venue"][venue].get("wickets", 0) + 1
@@ -399,17 +592,22 @@ def build_player_database(data_dir: str, min_year: int = 2022,
                 avg = bat["runs"] / max(bat["dismissals"], 1)
                 sr = (bat["runs"] / bat["balls"]) * 100
                 p["batting"] = {
-                    "innings": bat["innings"], "runs": bat["runs"],
-                    "balls_faced": bat["balls"], "average": round(avg, 2),
-                    "strike_rate": round(sr, 2), "matches": len(bat["matches"]),
+                    "innings": bat["innings"],
+                    "runs": bat["runs"],
+                    "balls_faced": bat["balls"],
+                    "average": round(avg, 2),
+                    "strike_rate": round(sr, 2),
+                    "matches": len(bat["matches"]),
                     "recent_scores": bat["recent_scores"][-5:],
                 }
             if has_bowl:
                 overs = bwl["balls"] / 6
                 econ = bwl["runs_conceded"] / overs if overs > 0 else 0
                 p["bowling"] = {
-                    "balls": bwl["balls"], "wickets": bwl["wickets"],
-                    "economy": round(econ, 2), "matches": len(bwl["matches"]),
+                    "balls": bwl["balls"],
+                    "wickets": bwl["wickets"],
+                    "economy": round(econ, 2),
+                    "matches": len(bwl["matches"]),
                 }
 
             if has_bat and has_bowl:
@@ -480,14 +678,14 @@ def build_player_database(data_dir: str, min_year: int = 2022,
                     pd = bat["by_phase"].get(phase, {"runs": 0, "balls": 0})
                     if pd["balls"] > 0:
                         p["batting"]["phases"][phase] = {
-                            "runs": pd["runs"], "balls": pd["balls"],
+                            "runs": pd["runs"],
+                            "balls": pd["balls"],
                             "sr": round((pd["runs"] / pd["balls"]) * 100, 1),
                         }
 
                 # Top venues
                 p["batting"]["venues"] = {}
-                top_venues = sorted(bat["by_venue"].items(),
-                                    key=lambda x: x[1].get("innings", 0), reverse=True)[:5]
+                top_venues = sorted(bat["by_venue"].items(), key=lambda x: x[1].get("innings", 0), reverse=True)[:5]
                 for vname, vd in top_venues:
                     if vd.get("innings", 0) >= 1:
                         p["batting"]["venues"][vname] = {
@@ -498,11 +696,13 @@ def build_player_database(data_dir: str, min_year: int = 2022,
 
                 # Vs opponents
                 p["batting"]["vs_team"] = {}
-                for opp, od in sorted(bat["by_opponent"].items(),
-                                      key=lambda x: x[1].get("innings", 0), reverse=True)[:8]:
+                for opp, od in sorted(bat["by_opponent"].items(), key=lambda x: x[1].get("innings", 0), reverse=True)[
+                    :8
+                ]:
                     if od["balls"] > 5:
                         p["batting"]["vs_team"][opp] = {
-                            "runs": od["runs"], "balls": od["balls"],
+                            "runs": od["runs"],
+                            "balls": od["balls"],
                             "sr": round((od["runs"] / od["balls"]) * 100, 1),
                         }
 
@@ -530,19 +730,20 @@ def build_player_database(data_dir: str, min_year: int = 2022,
                     if pd["balls"] > 0:
                         overs_p = pd["balls"] / 6
                         p["bowling"]["phases"][phase] = {
-                            "balls": pd["balls"], "runs": pd["runs"],
+                            "balls": pd["balls"],
+                            "runs": pd["runs"],
                             "wickets": pd["wickets"],
                             "econ": round(pd["runs"] / overs_p, 2) if overs_p > 0 else 0,
                         }
 
                 # Vs opponents
                 p["bowling"]["vs_team"] = {}
-                for opp, od in sorted(bwl["by_opponent"].items(),
-                                      key=lambda x: x[1]["balls"], reverse=True)[:8]:
+                for opp, od in sorted(bwl["by_opponent"].items(), key=lambda x: x[1]["balls"], reverse=True)[:8]:
                     if od["balls"] > 6:
                         overs_o = od["balls"] / 6
                         p["bowling"]["vs_team"][opp] = {
-                            "balls": od["balls"], "runs": od["runs"],
+                            "balls": od["balls"],
+                            "runs": od["runs"],
                             "wickets": od.get("wickets", 0),
                             "econ": round(od["runs"] / overs_o, 2) if overs_o > 0 else 0,
                         }
@@ -584,9 +785,7 @@ def main():
     print("=" * 80)
 
     t0 = time.time()
-    players, n_matches = build_player_database(
-        str(DATA_DIR), min_year=2022, target_teams=WC_SQUADS
-    )
+    players, n_matches = build_player_database(str(DATA_DIR), min_year=2022, target_teams=WC_SQUADS)
     elapsed = time.time() - t0
     print(f"  Completed in {elapsed:.1f}s")
 
@@ -600,9 +799,9 @@ def main():
     print(f"  Not found (new/alias): {not_found}")
 
     # Team summaries
-    print(f"\n  ┌─────────────────────────────────────────────────────┐")
-    print(f"  │  TEAM PLAYER COVERAGE                               │")
-    print(f"  └─────────────────────────────────────────────────────┘")
+    print("\n  ┌─────────────────────────────────────────────────────┐")
+    print("  │  TEAM PLAYER COVERAGE                               │")
+    print("  └─────────────────────────────────────────────────────┘")
     for team in sorted(WC_SQUADS.keys()):
         team_players = [p for p in players.values() if p["team"] == team]
         matched = sum(1 for p in team_players if p.get("cricsheet_name") != "NOT_FOUND")
@@ -610,9 +809,11 @@ def main():
         total_wkts = sum(p.get("bowling", {}).get("wickets", 0) for p in team_players)
         top_batter = max(team_players, key=lambda x: x.get("batting", {}).get("runs", 0))
         top_bowler = max(team_players, key=lambda x: x.get("bowling", {}).get("wickets", 0))
-        print(f"  {team:<16} {matched}/{len(team_players)} matched | "
-              f"Runs: {total_runs:>5} | Wkts: {total_wkts:>3} | "
-              f"Top bat: {top_batter['name'][:15]} | Top bowl: {top_bowler['name'][:15]}")
+        print(
+            f"  {team:<16} {matched}/{len(team_players)} matched | "
+            f"Runs: {total_runs:>5} | Wkts: {total_wkts:>3} | "
+            f"Top bat: {top_batter['name'][:15]} | Top bowl: {top_bowler['name'][:15]}"
+        )
 
     # ── Save full JSON ──
     output = {
@@ -633,14 +834,12 @@ def main():
         team_players = {name: players[name] for name in WC_SQUADS[team] if name in players}
         output["teams"][team] = {
             "squad_size": len(WC_SQUADS[team]),
-            "players_with_data": sum(1 for p in team_players.values()
-                                     if p.get("cricsheet_name") != "NOT_FOUND"),
-            "total_runs": sum(p.get("batting", {}).get("runs", 0)
-                              for p in team_players.values()),
-            "total_wickets": sum(p.get("bowling", {}).get("wickets", 0)
-                                 for p in team_players.values()),
-            "avg_impact": round(sum(p.get("impact_rating", 50) for p in team_players.values())
-                                / max(len(team_players), 1), 1),
+            "players_with_data": sum(1 for p in team_players.values() if p.get("cricsheet_name") != "NOT_FOUND"),
+            "total_runs": sum(p.get("batting", {}).get("runs", 0) for p in team_players.values()),
+            "total_wickets": sum(p.get("bowling", {}).get("wickets", 0) for p in team_players.values()),
+            "avg_impact": round(
+                sum(p.get("impact_rating", 50) for p in team_players.values()) / max(len(team_players), 1), 1
+            ),
             "squad": list(team_players.keys()),
         }
         for name, pdata in team_players.items():
@@ -654,14 +853,22 @@ def main():
     print(f"     Size: {json_path.stat().st_size / 1024:.1f} KB")
 
     # ── Print sample players ──
-    print(f"\n  ┌─────────────────────────────────────────────────────┐")
-    print(f"  │  SAMPLE PLAYER CARDS (auto-generated from CricSheet)│")
-    print(f"  └─────────────────────────────────────────────────────┘")
+    print("\n  ┌─────────────────────────────────────────────────────┐")
+    print("  │  SAMPLE PLAYER CARDS (auto-generated from CricSheet)│")
+    print("  └─────────────────────────────────────────────────────┘")
 
-    sample_players = ["Jasprit Bumrah", "Sanju Samson", "Finn Allen",
-                      "Mitchell Santner", "Harry Brook", "Aiden Markram",
-                      "Pathum Nissanka", "Rashid Khan", "Babar Azam",
-                      "Sikandar Raza"]
+    sample_players = [
+        "Jasprit Bumrah",
+        "Sanju Samson",
+        "Finn Allen",
+        "Mitchell Santner",
+        "Harry Brook",
+        "Aiden Markram",
+        "Pathum Nissanka",
+        "Rashid Khan",
+        "Babar Azam",
+        "Sikandar Raza",
+    ]
 
     for name in sample_players:
         p = players.get(name)
@@ -671,10 +878,11 @@ def main():
         print(f"     CricSheet: {p.get('cricsheet_name', 'N/A')}")
         if "batting" in p:
             b = p["batting"]
-            print(f"     BAT: {b['runs']} runs @ {b['average']} avg, SR {b['strike_rate']} "
-                  f"({b['innings']} inn, {b['matches']} matches)")
-            print(f"          4s: {b['fours']} | 6s: {b['sixes']} | "
-                  f"Form (last 5): {b.get('recent_scores', [])}")
+            print(
+                f"     BAT: {b['runs']} runs @ {b['average']} avg, SR {b['strike_rate']} "
+                f"({b['innings']} inn, {b['matches']} matches)"
+            )
+            print(f"          4s: {b['fours']} | 6s: {b['sixes']} | Form (last 5): {b.get('recent_scores', [])}")
             if b.get("phases"):
                 for ph, pd in b["phases"].items():
                     print(f"          {ph:>10}: SR {pd['sr']}")
@@ -683,8 +891,7 @@ def main():
                     print(f"          vs {opp}: SR {od['sr']} ({od['runs']}r/{od['balls']}b)")
         if "bowling" in p:
             bw = p["bowling"]
-            print(f"     BOWL: {bw['wickets']} wkts @ {bw['average']} avg, "
-                  f"Econ {bw['economy']} ({bw['overs']} ov)")
+            print(f"     BOWL: {bw['wickets']} wkts @ {bw['average']} avg, Econ {bw['economy']} ({bw['overs']} ov)")
             if bw.get("phases"):
                 for ph, pd in bw["phases"].items():
                     print(f"          {ph:>10}: Econ {pd['econ']}, Wkts {pd['wickets']}")

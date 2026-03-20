@@ -1,7 +1,4 @@
 """Tests for the football pipeline — Elo, features, Poisson scoring."""
-import math
-
-import pytest
 
 from football_pipeline import (
     FootballElo,

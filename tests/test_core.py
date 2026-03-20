@@ -1,16 +1,14 @@
 """Tests for core infrastructure — Database, Ratings, Calibration, Backtesting."""
+
 import numpy as np
-import pytest
 
 from core import (
     BacktestResult,
     BiasAuditor,
     MonteCarloSimulator,
-    OracleDB,
     ProbabilityCalibrator,
     RateLimiter,
     RatingEngine,
-    WalkForwardBacktester,
 )
 
 
@@ -18,14 +16,16 @@ class TestOracleDB:
     """Database layer tests."""
 
     def test_insert_and_get_match(self, tmp_db):
-        mid = tmp_db.insert_match({
-            "sport": "cricket",
-            "team_a": "India",
-            "team_b": "England",
-            "venue": "Mumbai",
-            "date": "2026-03-01",
-            "winner": "India",
-        })
+        mid = tmp_db.insert_match(
+            {
+                "sport": "cricket",
+                "team_a": "India",
+                "team_b": "England",
+                "venue": "Mumbai",
+                "date": "2026-03-01",
+                "winner": "India",
+            }
+        )
         assert mid
         matches = tmp_db.get_matches(sport="cricket")
         assert len(matches) >= 1
@@ -34,27 +34,31 @@ class TestOracleDB:
     def test_head_to_head(self, tmp_db):
         for winner in ["India", "India", "England"]:
             loser = "England" if winner == "India" else "India"
-            tmp_db.insert_match({
-                "sport": "cricket",
-                "team_a": winner,
-                "team_b": loser,
-                "winner": winner,
-                "date": "2026-01-01",
-            })
+            tmp_db.insert_match(
+                {
+                    "sport": "cricket",
+                    "team_a": winner,
+                    "team_b": loser,
+                    "winner": winner,
+                    "date": "2026-01-01",
+                }
+            )
         h2h = tmp_db.get_h2h("India", "England", "cricket")
         assert h2h["total"] == 3
         assert h2h["a_wins"] >= 1
 
     def test_insert_prediction(self, tmp_db):
-        pid = tmp_db.insert_prediction({
-            "sport": "cricket",
-            "team_a": "India",
-            "team_b": "NZ",
-            "prob_a": 0.65,
-            "prob_b": 0.35,
-            "predicted_winner": "India",
-            "confidence": "HIGH",
-        })
+        pid = tmp_db.insert_prediction(
+            {
+                "sport": "cricket",
+                "team_a": "India",
+                "team_b": "NZ",
+                "prob_a": 0.65,
+                "prob_b": 0.35,
+                "predicted_winner": "India",
+                "confidence": "HIGH",
+            }
+        )
         assert pid
 
     def test_cache_get_set(self, tmp_db):
@@ -171,6 +175,7 @@ class TestMonteCarloSimulator:
     def test_simulate_match(self):
         def predict(a, b):
             return 0.7, 0.3
+
         mc = MonteCarloSimulator(predict, n_simulations=100, seed=42)
         result = mc.simulate_match("A", "B")
         assert result in ("A", "B")
@@ -178,6 +183,7 @@ class TestMonteCarloSimulator:
     def test_simulate_series(self):
         def predict(a, b):
             return 0.6, 0.4
+
         mc = MonteCarloSimulator(predict, n_simulations=1000, seed=42)
         result = mc.simulate_series("India", "NZ", best_of=5)
         assert "India" in result
@@ -190,6 +196,7 @@ class TestMonteCarloSimulator:
             ea, eb = elos.get(a, 1500), elos.get(b, 1500)
             pa = 1 / (1 + 10 ** ((eb - ea) / 400))
             return pa, 1 - pa
+
         mc = MonteCarloSimulator(predict, n_simulations=500, seed=42)
         results = mc.simulate_tournament({"G1": ["A", "B"], "G2": ["C", "D"]})
         assert len(results) > 0
@@ -204,10 +211,24 @@ class TestBiasAuditor:
 
     def test_audit_with_predictions(self):
         preds = [
-            {"team_a": "A", "team_b": "B", "prob_a": 0.7, "predicted_winner": "A",
-             "actual_winner": "A", "is_correct": True, "stage": "group"},
-            {"team_a": "C", "team_b": "D", "prob_a": 0.6, "predicted_winner": "C",
-             "actual_winner": "D", "is_correct": False, "stage": "semi"},
+            {
+                "team_a": "A",
+                "team_b": "B",
+                "prob_a": 0.7,
+                "predicted_winner": "A",
+                "actual_winner": "A",
+                "is_correct": True,
+                "stage": "group",
+            },
+            {
+                "team_a": "C",
+                "team_b": "D",
+                "prob_a": 0.6,
+                "predicted_winner": "C",
+                "actual_winner": "D",
+                "is_correct": False,
+                "stage": "semi",
+            },
         ]
         result = BiasAuditor.audit(preds)
         assert result["overall_accuracy"] == 0.5

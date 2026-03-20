@@ -1,22 +1,23 @@
 """Tests for analytics module — Phase 1, 2 & 3."""
+
 import numpy as np
 import pytest
 
 from analytics import (
+    LEAGUE_RULES,
     AnalyticsEngine,
     BankrollSimulator,
     CLVTracker,
-    EVCalculator,
     EvaluationSuite,
+    EVCalculator,
     KellyStaker,
     MarketEfficiencyAnalyzer,
-    RatingChangePointDetector,
-    SHAPExplainer,
-    SeasonSimulator,
-    PlayoffCalculator,
     MarketEfficiencyMonitor,
+    PlayoffCalculator,
     PredictionTimeSeries,
-    LEAGUE_RULES,
+    RatingChangePointDetector,
+    SeasonSimulator,
+    SHAPExplainer,
 )
 
 
@@ -133,25 +134,24 @@ class TestCLVTracker:
         tracker = CLVTracker()
         # opening_odds 1.5 → implied 66.7%, closing_odds 1.6 → implied 62.5%
         # model 65% vs closing 62.5% → positive CLV of 0.025
-        record = tracker.track("pred_1", "cricket", "India", "NZ",
-                               model_prob_a=0.65, opening_odds_a=1.5,
-                               closing_odds_a=1.6)
+        record = tracker.track(
+            "pred_1", "cricket", "India", "NZ", model_prob_a=0.65, opening_odds_a=1.5, closing_odds_a=1.6
+        )
         assert record["clv"] > 0  # Model was ahead of closing line
         assert record["opening_implied_a"] > 0
         assert record["closing_implied_a"] > 0
 
     def test_track_with_db(self, tmp_db):
         tracker = CLVTracker(tmp_db)
-        record = tracker.track("pred_1", "cricket", "India", "NZ",
-                               model_prob_a=0.65, opening_odds_a=1.5,
-                               closing_odds_a=1.45)
+        record = tracker.track(
+            "pred_1", "cricket", "India", "NZ", model_prob_a=0.65, opening_odds_a=1.5, closing_odds_a=1.45
+        )
         assert record["prediction_id"] == "pred_1"
 
     def test_summary_no_closing_odds(self, tmp_db):
         # Insert a record with closing_odds=0 (no closing line captured)
         tracker = CLVTracker(tmp_db)
-        tracker.track("no_close", "cricket", "A", "B",
-                      model_prob_a=0.5, opening_odds_a=2.0, closing_odds_a=0)
+        tracker.track("no_close", "cricket", "A", "B", model_prob_a=0.5, opening_odds_a=2.0, closing_odds_a=0)
         # Summary filters for closing_odds > 0, so this shouldn't inflate count
         summary = tracker.summary(sport="nonexistent_sport")
         assert summary["n"] == 0
@@ -315,12 +315,9 @@ class TestMarketEfficiencyAnalyzer:
 
     def test_edge_report(self):
         bets = [
-            {"sport": "NBA", "league": "NBA", "confidence": "HIGH",
-             "edge_pct": 0.05, "won": True, "decimal_odds": 2.0},
-            {"sport": "NBA", "league": "NBA", "confidence": "LOW",
-             "edge_pct": 0.02, "won": False, "decimal_odds": 2.5},
-            {"sport": "NHL", "league": "NHL", "confidence": "HIGH",
-             "edge_pct": 0.08, "won": True, "decimal_odds": 1.8},
+            {"sport": "NBA", "league": "NBA", "confidence": "HIGH", "edge_pct": 0.05, "won": True, "decimal_odds": 2.0},
+            {"sport": "NBA", "league": "NBA", "confidence": "LOW", "edge_pct": 0.02, "won": False, "decimal_odds": 2.5},
+            {"sport": "NHL", "league": "NHL", "confidence": "HIGH", "edge_pct": 0.08, "won": True, "decimal_odds": 1.8},
         ]
         report = MarketEfficiencyAnalyzer.edge_report(bets)
         assert "by_sport" in report
@@ -382,6 +379,7 @@ class TestAnalyticsEngine:
 # Phase 2 Tests: SHAP + Changepoint Detection
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestSHAPExplainer:
     """SHAP feature importance tests."""
 
@@ -401,21 +399,21 @@ class TestSHAPExplainer:
 
     def test_fallback_explain_with_sklearn(self):
         from sklearn.ensemble import RandomForestClassifier
+
         rf = RandomForestClassifier(n_estimators=10, random_state=42)
         X = np.random.default_rng(42).random((50, 3))
         y = (X[:, 0] > 0.5).astype(int)
         rf.fit(X, y)
 
         explainer = SHAPExplainer(["a", "b", "c"])
-        result = explainer._fallback_explain(
-            {"RandomForest": rf}, X[:1]
-        )
+        result = explainer._fallback_explain({"RandomForest": rf}, X[:1])
         assert result["method"] == "sklearn_importance_fallback"
         assert len(result["top_for_a"]) > 0
 
     def test_fit_and_global_with_shap(self):
         """Test SHAP fit with a real RandomForest."""
         from sklearn.ensemble import RandomForestClassifier
+
         rng = np.random.default_rng(42)
         X = rng.random((100, 5))
         y = (X[:, 0] + X[:, 1] > 1).astype(int)
@@ -435,6 +433,7 @@ class TestSHAPExplainer:
     def test_explain_prediction_with_shap(self):
         """Test per-prediction SHAP explanation."""
         from sklearn.ensemble import RandomForestClassifier
+
         rng = np.random.default_rng(42)
         X = rng.random((100, 4))
         y = (X[:, 0] > 0.5).astype(int)
@@ -444,9 +443,7 @@ class TestSHAPExplainer:
         explainer = SHAPExplainer(["f1", "f2", "f3", "f4"])
         explainer.fit({"RandomForest": rf}, X, ["f1", "f2", "f3", "f4"])
 
-        result = explainer.explain_prediction(
-            {"RandomForest": rf}, X[:1], top_n=3
-        )
+        result = explainer.explain_prediction({"RandomForest": rf}, X[:1], top_n=3)
         assert "top_for_a" in result
         assert "top_for_b" in result
         assert result["method"] == "shap_tree"
@@ -523,10 +520,10 @@ class TestRatingChangePointDetector:
         # Insert enough history for detection
         for i in range(20):
             rating = 1500 + (i * 2)  # Gradual rise
-            cpd.log_rating("TeamX", "test", rating, "elo", f"2026-01-{i+1:02d}")
+            cpd.log_rating("TeamX", "test", rating, "elo", f"2026-01-{i + 1:02d}")
         # Add sudden jump
         for i in range(10):
-            cpd.log_rating("TeamX", "test", 1650 + i, "elo", f"2026-02-{i+1:02d}")
+            cpd.log_rating("TeamX", "test", 1650 + i, "elo", f"2026-02-{i + 1:02d}")
 
         result = cpd.detect("TeamX", "test")
         assert result["team"] == "TeamX"
@@ -542,12 +539,15 @@ class TestRatingChangePointDetector:
         cpd = RatingChangePointDetector(tmp_db)
         # Insert a changepoint with active boost
         with tmp_db.transaction() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO changepoints
                 (team, sport, detected_at, rating_before, rating_after,
                  direction, k_boost_remaining)
                 VALUES (?,?,?,?,?,?,?)
-            """, ("TeamY", "test", "2026-01-01", 1500, 1600, "UP", 3))
+            """,
+                ("TeamY", "test", "2026-01-01", 1500, 1600, "UP", 3),
+            )
 
         boost = cpd.get_k_boost("TeamY", "test")
         assert boost == 1.5
@@ -555,19 +555,20 @@ class TestRatingChangePointDetector:
     def test_decrement_k_boost(self, tmp_db):
         cpd = RatingChangePointDetector(tmp_db)
         with tmp_db.transaction() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO changepoints
                 (team, sport, detected_at, rating_before, rating_after,
                  direction, k_boost_remaining)
                 VALUES (?,?,?,?,?,?,?)
-            """, ("TeamZ", "test", "2026-01-01", 1500, 1600, "UP", 2))
+            """,
+                ("TeamZ", "test", "2026-01-01", 1500, 1600, "UP", 2),
+            )
 
         cpd.decrement_k_boost("TeamZ", "test")
         # Should now be 1
         conn = tmp_db._get_conn()
-        row = conn.execute(
-            "SELECT k_boost_remaining FROM changepoints WHERE team='TeamZ'"
-        ).fetchone()
+        row = conn.execute("SELECT k_boost_remaining FROM changepoints WHERE team='TeamZ'").fetchone()
         assert row["k_boost_remaining"] == 1
 
 
@@ -575,6 +576,7 @@ class TestRatingChangePointDetector:
 # Phase 3 Tests: Season Simulation, Playoff Calculator,
 #                Market Efficiency Monitor, Prediction TimeSeries
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestSeasonSimulator:
     """Season simulation tests."""
@@ -593,8 +595,7 @@ class TestSeasonSimulator:
             {"home": "Arsenal", "away": "Man City"},
         ]
         sim = SeasonSimulator()
-        result = sim.simulate(standings, fixtures, n_sims=500,
-                              playoff_spots=2, relegation_spots=1)
+        result = sim.simulate(standings, fixtures, n_sims=500, playoff_spots=2, relegation_spots=1)
 
         assert result["n_simulations"] == 500
         assert result["remaining_fixtures"] == 4
@@ -630,6 +631,7 @@ class TestSeasonSimulator:
 
     def test_custom_predict_fn(self):
         """Test with a custom prediction function."""
+
         def always_home_wins(home, away):
             return {"prob_a": 0.95, "prob_draw": 0.03}
 
@@ -672,11 +674,9 @@ class TestSeasonSimulator:
             {"home": "Mid", "away": "Weak"},
         ]
         sim = SeasonSimulator()
-        result = sim.simulate(standings, fixtures, n_sims=500,
-                              relegation_spots=1)
+        result = sim.simulate(standings, fixtures, n_sims=500, relegation_spots=1)
         # Awful should have highest relegation probability
-        assert result["teams"]["Awful"]["relegation_pct"] >= \
-               result["teams"]["Strong"]["relegation_pct"]
+        assert result["teams"]["Awful"]["relegation_pct"] >= result["teams"]["Strong"]["relegation_pct"]
 
     def test_league_rules_available(self):
         assert "football" in LEAGUE_RULES
@@ -691,10 +691,7 @@ class TestPlayoffCalculator:
 
     def test_basic_bracket_4_teams(self):
         calc = PlayoffCalculator()
-        result = calc.bracket_simulation(
-            ["Team1", "Team2", "Team3", "Team4"],
-            n_sims=2000, best_of=1
-        )
+        result = calc.bracket_simulation(["Team1", "Team2", "Team3", "Team4"], n_sims=2000, best_of=1)
         assert result["bracket_size"] == 4
         assert result["n_simulations"] == 2000
         assert len(result["teams"]) == 4
@@ -718,26 +715,19 @@ class TestPlayoffCalculator:
     def test_best_of_7_series(self):
         """NBA-style best-of-7 playoffs."""
         calc = PlayoffCalculator()
-        result = calc.bracket_simulation(
-            ["Celtics", "Heat", "Bucks", "Sixers"],
-            n_sims=2000, best_of=7
-        )
+        result = calc.bracket_simulation(["Celtics", "Heat", "Bucks", "Sixers"], n_sims=2000, best_of=7)
         assert result["best_of"] == 7
-        total_champ = sum(
-            v["championship_pct"] for v in result["teams"].values()
-        )
+        total_champ = sum(v["championship_pct"] for v in result["teams"].values())
         assert abs(total_champ - 100) < 1  # Should sum to ~100%
 
     def test_custom_predict_fn(self):
         """1-seed should win most when strongly favored."""
+
         def favor_first(a, b):
             return {"prob_a": 0.8}
 
         calc = PlayoffCalculator(predict_fn=favor_first)
-        result = calc.bracket_simulation(
-            ["Favorite", "Underdog1", "Underdog2", "Underdog3"],
-            n_sims=3000
-        )
+        result = calc.bracket_simulation(["Favorite", "Underdog1", "Underdog2", "Underdog3"], n_sims=3000)
         # Favorite should win championship most often
         assert result["teams"]["Favorite"]["championship_pct"] > 30
 
@@ -751,9 +741,7 @@ class TestPlayoffCalculator:
             "DC": {"points": 8},
         }
         calc = PlayoffCalculator()
-        result = calc.round_robin_playoff(
-            standings, qualify_top_n=4, n_sims=1000
-        )
+        result = calc.round_robin_playoff(standings, qualify_top_n=4, n_sims=1000)
         assert "qualified_from_group" in result
         assert len(result["qualified_from_group"]) == 4
         assert "CSK" in result["qualified_from_group"]
@@ -763,8 +751,7 @@ class TestPlayoffCalculator:
         calc = PlayoffCalculator()
         result = calc.bracket_simulation(["A", "B"], n_sims=1000)
         assert result["bracket_size"] == 2
-        total = result["teams"]["A"]["championship_pct"] + \
-                result["teams"]["B"]["championship_pct"]
+        total = result["teams"]["A"]["championship_pct"] + result["teams"]["B"]["championship_pct"]
         assert abs(total - 100) < 1
 
 
@@ -819,12 +806,9 @@ class TestPredictionTimeSeries:
 
     def test_log_and_get_evolution(self, tmp_db):
         ts = PredictionTimeSeries(tmp_db)
-        ts.log_snapshot("match_1", "cricket", "India", "Australia",
-                        0.65, "HIGH", days_until_match=7)
-        ts.log_snapshot("match_1", "cricket", "India", "Australia",
-                        0.70, "HIGH", days_until_match=3)
-        ts.log_snapshot("match_1", "cricket", "India", "Australia",
-                        0.72, "VERY HIGH", days_until_match=0.5)
+        ts.log_snapshot("match_1", "cricket", "India", "Australia", 0.65, "HIGH", days_until_match=7)
+        ts.log_snapshot("match_1", "cricket", "India", "Australia", 0.70, "HIGH", days_until_match=3)
+        ts.log_snapshot("match_1", "cricket", "India", "Australia", 0.72, "VERY HIGH", days_until_match=0.5)
 
         evolution = ts.get_evolution("match_1")
         assert len(evolution) >= 3
@@ -840,12 +824,9 @@ class TestPredictionTimeSeries:
 
     def test_probability_drift_with_data(self, tmp_db):
         ts = PredictionTimeSeries(tmp_db)
-        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.55,
-                        days_until_match=5)
-        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.65,
-                        days_until_match=2)
-        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.75,
-                        days_until_match=0)
+        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.55, days_until_match=5)
+        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.65, days_until_match=2)
+        ts.log_snapshot("m2", "NBA", "Lakers", "Celtics", 0.75, days_until_match=0)
 
         drift = ts.probability_drift("m2")
         assert drift["n_snapshots"] == 3
@@ -890,6 +871,7 @@ class TestAnalyticsEnginePhase3:
 # Integration Tests: DB-connected paths
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestMarketEfficiencyMonitorDB:
     """Market efficiency monitor with real database."""
 
@@ -902,14 +884,25 @@ class TestMarketEfficiencyMonitorDB:
             is_correct = int(rng.random() < prob_a)
             sport = "cricket" if i % 3 == 0 else "NBA"
             confidence = "HIGH" if prob_a > 0.6 else "LOW"
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR IGNORE INTO predictions
                 (id, team_a, team_b, sport, prob_a, confidence, is_correct,
                  odds_json, created_at)
                 VALUES (?,?,?,?,?,?,?,?,datetime('now', ?))
-            """, (f"{prefix}_{i}", f"TeamA_{i}", f"TeamB_{i}", sport,
-                  prob_a, confidence, is_correct, "{}",
-                  f"-{n - i} minutes"))
+            """,
+                (
+                    f"{prefix}_{i}",
+                    f"TeamA_{i}",
+                    f"TeamB_{i}",
+                    sport,
+                    prob_a,
+                    confidence,
+                    is_correct,
+                    "{}",
+                    f"-{n - i} minutes",
+                ),
+            )
         conn.commit()
 
     def test_rolling_performance_with_data(self, tmp_db):
@@ -959,7 +952,7 @@ class TestPredictionTimeSeriesDB:
     """PredictionTimeSeries with real database."""
 
     def test_schema_created_on_init(self, tmp_db):
-        ts = PredictionTimeSeries(tmp_db)
+        PredictionTimeSeries(tmp_db)
         conn = tmp_db._get_conn()
         # Verify table exists
         tables = conn.execute(
@@ -1011,13 +1004,15 @@ class TestAnalyticsEngineIntegration:
         for i in range(20):
             prob = 0.6 + (i % 5) * 0.05
             correct = 1 if i % 3 != 0 else 0
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO predictions
                 (id, team_a, team_b, sport, prob_a, confidence,
                  is_correct, odds_json)
                 VALUES (?,?,?,?,?,?,?,?)
-            """, (f"test_{i}", "A", "B", "cricket", prob,
-                  "HIGH", correct, "{}"))
+            """,
+                (f"test_{i}", "A", "B", "cricket", prob, "HIGH", correct, "{}"),
+            )
         conn.commit()
 
         report = engine.evaluation_report(sport="cricket", n=50)
@@ -1063,8 +1058,8 @@ class TestRatingEngineWithChangepoint:
 
     def test_elo_update_logs_rating_history(self, tmp_db):
         """elo_update should log to rating_history when tracker is set."""
-        from core import RatingEngine
         from analytics import RatingChangePointDetector
+        from core import RatingEngine
 
         ratings = RatingEngine(tmp_db)
         cpd = RatingChangePointDetector(tmp_db)
@@ -1080,15 +1075,15 @@ class TestRatingEngineWithChangepoint:
 
     def test_elo_update_with_k_boost(self, tmp_db):
         """K-boost from changepoint should amplify rating change."""
-        from core import RatingEngine
         from analytics import RatingChangePointDetector
+        from core import RatingEngine
 
         ratings = RatingEngine(tmp_db)
         cpd = RatingChangePointDetector(tmp_db)
         ratings._changepoint_detector = cpd
 
         # No boost — get baseline change
-        w1, l1 = ratings.elo_update("TeamA", "TeamB", "test", K=32)
+        w1, _l1 = ratings.elo_update("TeamA", "TeamB", "test", K=32)
         delta_no_boost = w1 - 1500  # Initial rating is 1500
 
         # Reset ratings
@@ -1097,14 +1092,17 @@ class TestRatingEngineWithChangepoint:
 
         # Insert active K-boost for TeamC
         with tmp_db.transaction() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO changepoints
                 (team, sport, detected_at, rating_before, rating_after,
                  direction, k_boost_remaining)
                 VALUES (?,?,?,?,?,?,?)
-            """, ("TeamC", "test", "2026-01-01", 1500, 1600, "UP", 3))
+            """,
+                ("TeamC", "test", "2026-01-01", 1500, 1600, "UP", 3),
+            )
 
-        w2, l2 = ratings.elo_update("TeamC", "TeamD", "test", K=32)
+        w2, _l2 = ratings.elo_update("TeamC", "TeamD", "test", K=32)
         delta_with_boost = w2 - 1500
 
         # Boosted delta should be larger (1.5x K)
@@ -1112,26 +1110,27 @@ class TestRatingEngineWithChangepoint:
 
     def test_elo_update_decrements_k_boost(self, tmp_db):
         """After elo_update, K-boost remaining should decrease."""
-        from core import RatingEngine
         from analytics import RatingChangePointDetector
+        from core import RatingEngine
 
         ratings = RatingEngine(tmp_db)
         cpd = RatingChangePointDetector(tmp_db)
         ratings._changepoint_detector = cpd
 
         with tmp_db.transaction() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO changepoints
                 (team, sport, detected_at, rating_before, rating_after,
                  direction, k_boost_remaining)
                 VALUES (?,?,?,?,?,?,?)
-            """, ("TeamE", "test", "2026-01-01", 1500, 1600, "UP", 3))
+            """,
+                ("TeamE", "test", "2026-01-01", 1500, 1600, "UP", 3),
+            )
 
         ratings.elo_update("TeamE", "TeamF", "test", K=32)
 
         # Check k_boost_remaining decremented
         conn = tmp_db._get_conn()
-        row = conn.execute(
-            "SELECT k_boost_remaining FROM changepoints WHERE team='TeamE'"
-        ).fetchone()
+        row = conn.execute("SELECT k_boost_remaining FROM changepoints WHERE team='TeamE'").fetchone()
         assert row["k_boost_remaining"] == 2

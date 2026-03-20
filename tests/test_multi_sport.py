@@ -1,5 +1,4 @@
 """Tests for multi-sport Elo engine."""
-import pytest
 
 from multi_sport import SportElo
 
@@ -41,7 +40,7 @@ class TestSportElo:
         elo.ratings["C"] = 1500
         rankings = elo.rankings(n=2)
         assert len(rankings) == 2
-        assert list(rankings.keys())[0] == "A"
+        assert next(iter(rankings.keys())) == "A"
 
     def test_set_prior_from_record(self):
         elo = SportElo()

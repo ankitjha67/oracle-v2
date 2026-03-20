@@ -16,15 +16,14 @@ Endpoints:
     GET  /predictions/recent  — Recent predictions
     GET  /backtest/{sport}    — Backtest results
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger("oracle.api_server")
 
@@ -36,19 +35,24 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, Field
 except ImportError:
-    raise ImportError(
-        "FastAPI not installed. Run: pip install fastapi uvicorn\n"
-        "Then: python api_server.py"
-    )
+    raise ImportError("FastAPI not installed. Run: pip install fastapi uvicorn\nThen: python api_server.py") from None
 
-from core import OracleDB, RatingEngine, BiasAuditor
-from analytics import (AnalyticsEngine, EVCalculator, KellyStaker,
-                       EvaluationSuite, RatingChangePointDetector,
-                       SeasonSimulator, PlayoffCalculator,
-                       MarketEfficiencyMonitor, PredictionTimeSeries,
-                       LEAGUE_RULES)
+from analytics import (  # noqa: E402
+    LEAGUE_RULES,
+    AnalyticsEngine,
+    EvaluationSuite,
+    EVCalculator,
+    KellyStaker,
+    MarketEfficiencyMonitor,
+    PlayoffCalculator,
+    PredictionTimeSeries,
+    RatingChangePointDetector,
+    SeasonSimulator,
+)
+from core import OracleDB, RatingEngine  # noqa: E402
 
 # ── Pydantic models ────────────────────────────────────────────────────────
+
 
 class CricketPredictionRequest(BaseModel):
     team_a: str = Field(..., examples=["India"])
@@ -80,7 +84,7 @@ class PredictionResponse(BaseModel):
     prob_b: float
     model_agreement: dict = {}
     feature_importance: dict = {}
-    weather: Optional[dict] = None
+    weather: dict | None = None
 
 
 class HealthResponse(BaseModel):
@@ -126,6 +130,7 @@ def get_oracle():
     if _oracle is None:
         try:
             from engine import OracleV2
+
             _oracle = OracleV2()
             logger.info("Oracle engine initialized")
         except Exception as e:
@@ -134,6 +139,7 @@ def get_oracle():
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
+
 
 @app.get("/health", response_model=HealthResponse)
 def health_check():
@@ -170,9 +176,8 @@ def get_ratings(sport: str, top_n: int = 30):
     """Get team/player Elo ratings for a sport."""
     conn = db._get_conn()
     rows = conn.execute(
-        "SELECT team, rating FROM team_ratings WHERE sport=? AND rating_type='elo' "
-        "ORDER BY rating DESC LIMIT ?",
-        (sport, top_n)
+        "SELECT team, rating FROM team_ratings WHERE sport=? AND rating_type='elo' ORDER BY rating DESC LIMIT ?",
+        (sport, top_n),
     ).fetchall()
     if not rows:
         raise HTTPException(status_code=404, detail=f"No ratings found for sport: {sport}")
@@ -187,7 +192,9 @@ def predict_cricket(req: CricketPredictionRequest):
     """Generate a cricket match prediction using 12 ML models."""
     oracle = get_oracle()
     if oracle is None or not oracle.is_trained:
-        raise HTTPException(status_code=503, detail="Prediction engine not trained. Run 'python run.py --cricket' first.")
+        raise HTTPException(
+            status_code=503, detail="Prediction engine not trained. Run 'python run.py --cricket' first."
+        )
 
     match = {
         "team_a": req.team_a,
@@ -250,6 +257,7 @@ def bias_audit(sport: str = "cricket"):
 
 # ── Analytics Endpoints ────────────────────────────────────────────────────
 
+
 @app.get("/analytics/evaluation/{sport}")
 def analytics_evaluation(sport: str):
     """Comprehensive evaluation report: Brier, BSS, log loss, ROC-AUC, calibration."""
@@ -294,6 +302,7 @@ def analytics_calibration(sport: str, n_bins: int = 10):
     if not rows:
         raise HTTPException(status_code=404, detail=f"No scored predictions for {sport}")
     import numpy as np
+
     predicted = np.array([r["prob_a"] for r in rows])
     actual = np.array([r["is_correct"] for r in rows])
     return EvaluationSuite.calibration_data(predicted, actual, n_bins)
@@ -303,14 +312,11 @@ def analytics_calibration(sport: str, n_bins: int = 10):
 def explain_prediction(prediction_id: str):
     """Get SHAP-based explanation for a specific prediction."""
     conn = db._get_conn()
-    row = conn.execute(
-        "SELECT * FROM predictions WHERE id=?", (prediction_id,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM predictions WHERE id=?", (prediction_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
 
     pred = dict(row)
-    import json
     features = json.loads(pred.get("features_json", "{}"))
     model_votes = json.loads(pred.get("model_votes_json", "{}"))
 
@@ -337,8 +343,7 @@ def rating_history(team: str, sport: str = "cricket", n: int = 100):
 
 
 @app.get("/analytics/changepoint/{team}")
-def detect_changepoint(team: str, sport: str = "cricket",
-                       threshold: float = 2.0):
+def detect_changepoint(team: str, sport: str = "cricket", threshold: float = 2.0):
     """Run CUSUM changepoint detection on a team's rating trajectory."""
     cpd = RatingChangePointDetector(db)
     result = cpd.detect(team, sport, threshold=threshold)
@@ -349,30 +354,31 @@ def detect_changepoint(team: str, sport: str = "cricket",
 def analytics_market_efficiency():
     """Market efficiency analysis — where does Oracle have edge?"""
     conn = db._get_conn()
-    rows = conn.execute(
-        "SELECT * FROM predictions WHERE is_correct >= 0 AND odds_json != '{}'"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM predictions WHERE is_correct >= 0 AND odds_json != '{}'").fetchall()
     if not rows:
         raise HTTPException(status_code=404, detail="No predictions with odds data")
     # Build bet records
-    import json
     bets = []
     for r in rows:
         odds = json.loads(r["odds_json"]) if r["odds_json"] else {}
         if not odds:
             continue
-        bets.append({
-            "sport": r["sport"],
-            "confidence": r["confidence"],
-            "won": r["is_correct"] == 1,
-            "edge_pct": r["prob_a"] - odds.get("implied_prob_a", 0.5),
-            "decimal_odds": 1 / odds.get("implied_prob_a", 0.5) if odds.get("implied_prob_a", 0) > 0 else 2.0,
-        })
+        bets.append(
+            {
+                "sport": r["sport"],
+                "confidence": r["confidence"],
+                "won": r["is_correct"] == 1,
+                "edge_pct": r["prob_a"] - odds.get("implied_prob_a", 0.5),
+                "decimal_odds": 1 / odds.get("implied_prob_a", 0.5) if odds.get("implied_prob_a", 0) > 0 else 2.0,
+            }
+        )
     from analytics import MarketEfficiencyAnalyzer
+
     return MarketEfficiencyAnalyzer.edge_report(bets)
 
 
 # ── Phase 3 Models + Endpoints ────────────────────────────────────────────
+
 
 class SeasonSimulationRequest(BaseModel):
     standings: dict = Field(..., description="Team standings: {team: {points: N, gd: N}}")
@@ -394,9 +400,13 @@ def season_simulation(req: SeasonSimulationRequest):
     """Monte Carlo season simulation — project final standings from current state."""
     rules = LEAGUE_RULES.get(req.league, LEAGUE_RULES["football"])
     sim = SeasonSimulator(league_rules=rules)
-    result = sim.simulate(req.standings, req.remaining_fixtures,
-                          n_sims=req.n_sims, playoff_spots=req.playoff_spots,
-                          relegation_spots=req.relegation_spots)
+    result = sim.simulate(
+        req.standings,
+        req.remaining_fixtures,
+        n_sims=req.n_sims,
+        playoff_spots=req.playoff_spots,
+        relegation_spots=req.relegation_spots,
+    )
     return result
 
 
@@ -407,15 +417,14 @@ def playoff_simulation(req: PlayoffSimulationRequest):
     Bracket size must be a power of 2.
     """
     calc = PlayoffCalculator()
-    result = calc.bracket_simulation(req.seeds, n_sims=req.n_sims,
-                                     best_of=req.best_of)
+    result = calc.bracket_simulation(req.seeds, n_sims=req.n_sims, best_of=req.best_of)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 
 @app.get("/analytics/rolling-performance")
-def rolling_performance(sport: str = None, n: int = 500):
+def rolling_performance(sport: str | None = None, n: int = 500):
     """Rolling accuracy and Brier score over time windows (20, 50, 100)."""
     monitor = MarketEfficiencyMonitor(db)
     result = monitor.rolling_performance(sport=sport, n=n)
@@ -425,7 +434,7 @@ def rolling_performance(sport: str = None, n: int = 500):
 
 
 @app.get("/analytics/degradation")
-def check_degradation(sport: str = None, n: int = 200):
+def check_degradation(sport: str | None = None, n: int = 200):
     """Check if model accuracy is degrading over recent predictions."""
     conn = db._get_conn()
     q = "SELECT prob_a, is_correct FROM predictions WHERE is_correct >= 0"
@@ -440,8 +449,7 @@ def check_degradation(sport: str = None, n: int = 200):
         raise HTTPException(status_code=404, detail="No scored predictions")
 
     accuracies = [
-        1 if (r["prob_a"] > 0.5 and r["is_correct"] == 1) or
-             (r["prob_a"] <= 0.5 and r["is_correct"] == 0) else 0
+        1 if (r["prob_a"] > 0.5 and r["is_correct"] == 1) or (r["prob_a"] <= 0.5 and r["is_correct"] == 0) else 0
         for r in rows
     ]
     return MarketEfficiencyMonitor.detect_degradation(accuracies)
@@ -463,8 +471,7 @@ def prediction_evolution(match_id: str):
     ts = PredictionTimeSeries(db)
     evolution = ts.get_evolution(match_id)
     if not evolution:
-        raise HTTPException(status_code=404,
-                            detail=f"No prediction snapshots for {match_id}")
+        raise HTTPException(status_code=404, detail=f"No prediction snapshots for {match_id}")
     drift = ts.probability_drift(match_id)
     return {"evolution": evolution, "drift": drift}
 
@@ -473,6 +480,7 @@ def prediction_evolution(match_id: str):
 
 if __name__ == "__main__":
     import uvicorn
+
     print("Starting Oracle V2 API server...")
     print("Docs: http://localhost:8000/docs")
     uvicorn.run(app, host="0.0.0.0", port=8000)

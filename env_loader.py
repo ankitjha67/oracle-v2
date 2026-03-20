@@ -2,10 +2,12 @@
 Oracle V2 — Environment Variable Loader
 Loads API keys from .env file (no python-dotenv dependency needed).
 """
+
 import os
 from pathlib import Path
 
 _BASE = Path(os.path.dirname(os.path.abspath(__file__)))
+
 
 def load_env(env_path=None):
     """Load .env file into os.environ. No external deps."""
@@ -26,13 +28,16 @@ def load_env(env_path=None):
                 loaded[key] = value
     return loaded
 
+
 def get_key(name, default=""):
     """Get an API key from env."""
     return os.environ.get(name, default)
 
+
 def has_key(name):
     """Check if an API key is set and non-empty."""
     return bool(os.environ.get(name, "").strip())
+
 
 # Auto-load on import
 _loaded = load_env()
