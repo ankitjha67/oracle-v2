@@ -86,6 +86,7 @@ FOOTBALL_DIR = OUTPUT_DIR / "football_data"
 
 from core import (OracleDB, RatingEngine, ProbabilityCalibrator, MonteCarloSimulator, BiasAuditor, BacktestResult)
 from engine import (PlayerDatabase, extract_features, FEATURE_NAMES, build_models, OracleV2, get_venue_data)
+from analytics import AnalyticsEngine, EvaluationSuite
 from cricsheet_pipeline import build_player_database, WC_SQUADS
 from football_pipeline import (load_all_matches, FootballElo, build_features_and_labels,
     build_football_models, predict_upcoming, poisson_score_predict, backtest_roi_on_training_data,
@@ -432,6 +433,45 @@ def run(cricket=True, football=True, multi=True):
                       f"{bias.get('favorite_bias',{}).get('assessment','N/A')} favorite bias")
     except Exception:
         pass
+
+    # ANALYTICS REPORT (Phase 1: "Are We Actually Good?")
+    print("\n"+"═"*80); print("  📊 ANALYTICS REPORT"); print("═"*80)
+    try:
+        db_path = OUTPUT_DIR / "oracle.db"
+        if db_path.exists():
+            _adb = OracleDB(str(db_path))
+            analytics = AnalyticsEngine(_adb)
+            eval_report = analytics.evaluation_report()
+            if "error" not in eval_report:
+                R["analytics_evaluation"] = eval_report
+                overall = eval_report.get("overall", {})
+                print(f"  Brier Score:       {overall.get('brier_score', 'N/A')}")
+                print(f"  Brier Skill Score: {overall.get('brier_skill_score', 'N/A')}")
+                print(f"  Log Loss:          {overall.get('log_loss', 'N/A')}")
+                print(f"  ROC-AUC:           {overall.get('roc_auc', 'N/A')}")
+                cal = overall.get("calibration", {})
+                if cal:
+                    print(f"  ECE:               {cal.get('ece', 'N/A')}")
+                    print(f"  Sharpness:         {cal.get('sharpness', 'N/A')}")
+                # Per-sport breakdown
+                by_sport = eval_report.get("by_sport", {})
+                if by_sport:
+                    print(f"\n  Per-Sport Metrics:")
+                    for sport, metrics in by_sport.items():
+                        if "error" not in metrics:
+                            print(f"    {sport:<15} Acc={metrics.get('accuracy','?'):.1%}  "
+                                  f"BSS={metrics.get('brier_skill_score','?'):.3f}  "
+                                  f"n={metrics.get('n',0)}")
+                # CLV summary
+                clv = eval_report.get("clv_summary", {})
+                if clv.get("n", 0) > 0:
+                    print(f"\n  CLV Summary ({clv['n']} bets):")
+                    print(f"    Avg CLV: {clv.get('avg_clv', 0):+.4f}  "
+                          f"Positive: {clv.get('pct_positive', 0):.1%}")
+            else:
+                print(f"  {eval_report.get('error', 'No data')}")
+    except Exception as e:
+        print(f"  ⚠️ Analytics: {e}")
 
     # GAMBLING DISCLAIMER
     print(GAMBLING_DISCLAIMER)

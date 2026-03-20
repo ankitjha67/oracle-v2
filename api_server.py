@@ -42,6 +42,7 @@ except ImportError:
     )
 
 from core import OracleDB, RatingEngine, BiasAuditor
+from analytics import AnalyticsEngine, EVCalculator, KellyStaker, EvaluationSuite
 
 # ── Pydantic models ────────────────────────────────────────────────────────
 
@@ -108,6 +109,7 @@ app.add_middleware(
 OUTPUT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 db = OracleDB(str(OUTPUT_DIR / "oracle.db"))
 ratings = RatingEngine(db)
+analytics = AnalyticsEngine(db)
 
 # Lazy-load prediction engine
 _oracle = None
@@ -240,6 +242,84 @@ def bias_audit(sport: str = "cricket"):
         "sport": sport,
         "accuracy": acc,
     }
+
+
+# ── Analytics Endpoints ────────────────────────────────────────────────────
+
+@app.get("/analytics/evaluation/{sport}")
+def analytics_evaluation(sport: str):
+    """Comprehensive evaluation report: Brier, BSS, log loss, ROC-AUC, calibration."""
+    report = analytics.evaluation_report(sport=sport)
+    if "error" in report:
+        raise HTTPException(status_code=404, detail=report["error"])
+    return report
+
+
+@app.get("/analytics/evaluation")
+def analytics_evaluation_all():
+    """Evaluation report across all sports."""
+    return analytics.evaluation_report()
+
+
+@app.get("/analytics/clv/{sport}")
+def analytics_clv(sport: str):
+    """Closing Line Value summary for a sport."""
+    return analytics.clv.summary(sport=sport)
+
+
+@app.get("/analytics/clv")
+def analytics_clv_all():
+    """CLV summary across all sports."""
+    return analytics.clv.summary()
+
+
+@app.post("/analytics/ev")
+def analytics_ev(model_prob: float, decimal_odds: float):
+    """Calculate Expected Value and Kelly fraction for a bet."""
+    ev = EVCalculator.calculate_ev(model_prob, decimal_odds)
+    kelly = KellyStaker.kelly_fraction(model_prob, decimal_odds)
+    return {**ev, "kelly_quarter": kelly, "kelly_half": KellyStaker.kelly_fraction(model_prob, decimal_odds, 0.5)}
+
+
+@app.get("/analytics/calibration/{sport}")
+def analytics_calibration(sport: str, n_bins: int = 10):
+    """Reliability diagram data for a sport."""
+    conn = db._get_conn()
+    q = "SELECT prob_a, is_correct FROM predictions WHERE is_correct >= 0 AND sport=?"
+    rows = conn.execute(q, (sport,)).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No scored predictions for {sport}")
+    import numpy as np
+    predicted = np.array([r["prob_a"] for r in rows])
+    actual = np.array([r["is_correct"] for r in rows])
+    return EvaluationSuite.calibration_data(predicted, actual, n_bins)
+
+
+@app.get("/analytics/market-efficiency")
+def analytics_market_efficiency():
+    """Market efficiency analysis — where does Oracle have edge?"""
+    conn = db._get_conn()
+    rows = conn.execute(
+        "SELECT * FROM predictions WHERE is_correct >= 0 AND odds_json != '{}'"
+    ).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No predictions with odds data")
+    # Build bet records
+    import json
+    bets = []
+    for r in rows:
+        odds = json.loads(r["odds_json"]) if r["odds_json"] else {}
+        if not odds:
+            continue
+        bets.append({
+            "sport": r["sport"],
+            "confidence": r["confidence"],
+            "won": r["is_correct"] == 1,
+            "edge_pct": r["prob_a"] - odds.get("implied_prob_a", 0.5),
+            "decimal_odds": 1 / odds.get("implied_prob_a", 0.5) if odds.get("implied_prob_a", 0) > 0 else 2.0,
+        })
+    from analytics import MarketEfficiencyAnalyzer
+    return MarketEfficiencyAnalyzer.edge_report(bets)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────

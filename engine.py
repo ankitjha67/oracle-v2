@@ -639,9 +639,9 @@ class OracleV2:
                 except Exception as e:
                     logger.warning(f"Meta-learner failed: {e}")
 
-        # Calibration
+        # Calibration — use last 30% as held-out to avoid leakage
         all_probs = []
-        for xi, yi in zip(X_scaled, y):
+        for xi in X_scaled:
             preds = []
             for m in self.models.values():
                 if hasattr(m, "predict_proba"):
@@ -653,8 +653,18 @@ class OracleV2:
             if preds:
                 all_probs.append(np.mean(preds))
         if all_probs:
-            self.calibrator.fit_platt(np.array(all_probs), y)
-            self.calibrator.fit_isotonic(np.array(all_probs), y)
+            all_probs_arr = np.array(all_probs)
+            # Split: fit calibrator on held-out portion to prevent leakage
+            cal_split = max(int(len(all_probs_arr) * 0.7), 1)
+            cal_probs = all_probs_arr[cal_split:]
+            cal_labels = y[cal_split:]
+            if len(cal_probs) >= 5:
+                self.calibrator.fit_platt(cal_probs, cal_labels)
+                self.calibrator.fit_isotonic(cal_probs, cal_labels, n_bins=15)
+            else:
+                # Not enough held-out data, fit on all (small dataset fallback)
+                self.calibrator.fit_platt(all_probs_arr, y)
+                self.calibrator.fit_isotonic(all_probs_arr, y, n_bins=15)
 
         self.is_trained = True
         self.training_stats = {
@@ -734,6 +744,45 @@ class OracleV2:
             feat_imp = {k: round(v/total, 4) for k, v in
                         sorted(feat_imp.items(), key=lambda x: -x[1])[:15]}
 
+        # Confidence interval from bootstrap over model outputs
+        ci_data = {}
+        if len(probs_a) >= 3:
+            rng = np.random.default_rng(42)
+            boot_means = [
+                float(np.mean(rng.choice(probs_a, size=len(probs_a), replace=True)))
+                for _ in range(500)
+            ]
+            ci_data = {
+                "mean": round(float(np.mean(boot_means)) * 100, 1),
+                "ci_lower": round(float(np.percentile(boot_means, 5)) * 100, 1),
+                "ci_upper": round(float(np.percentile(boot_means, 95)) * 100, 1),
+                "ci_width": round(float(np.percentile(boot_means, 95) - np.percentile(boot_means, 5)) * 100, 1),
+            }
+
+        # EV / Kelly analytics (when market odds available)
+        analytics_data = {}
+        odds_prob_a = match.get("odds_prob_a", 0)
+        odds_prob_b = match.get("odds_prob_b", 0)
+        if odds_prob_a > 0 and odds_prob_b > 0:
+            try:
+                from analytics import EVCalculator, KellyStaker
+                odds_a_decimal = 1.0 / odds_prob_a if odds_prob_a > 0 else 0
+                odds_b_decimal = 1.0 / odds_prob_b if odds_prob_b > 0 else 0
+                ev_a = EVCalculator.calculate_ev(calibrated_prob_a, odds_a_decimal)
+                ev_b = EVCalculator.calculate_ev(prob_b, odds_b_decimal)
+                kelly_a = KellyStaker.kelly_fraction(calibrated_prob_a, odds_a_decimal)
+                kelly_b = KellyStaker.kelly_fraction(prob_b, odds_b_decimal)
+                analytics_data = {
+                    "ev_a": ev_a,
+                    "ev_b": ev_b,
+                    "kelly_a_pct": round(kelly_a * 100, 2),
+                    "kelly_b_pct": round(kelly_b * 100, 2),
+                    "value_side": match["team_a"] if ev_a["ev"] > ev_b["ev"] and ev_a["ev"] > 0
+                                  else (match["team_b"] if ev_b["ev"] > 0 else "NO VALUE"),
+                }
+            except ImportError:
+                pass
+
         prediction = {
             "team_a": match["team_a"],
             "team_b": match["team_b"],
@@ -744,6 +793,7 @@ class OracleV2:
             "calibrated_prob_b": round(prob_b * 100, 1),
             "predicted_winner": winner,
             "confidence": confidence,
+            "confidence_interval": ci_data,
             "model_agreement": {
                 "std_dev": round(model_std, 4),
                 "disagreement_pct": round(disagreement_penalty * 100, 1),
@@ -755,6 +805,7 @@ class OracleV2:
             "models_for_b": sum(1 for v in model_votes.values()
                                 if v["winner"] == match["team_b"]),
             "feature_importance": feat_imp,
+            "analytics": analytics_data,
             "weather": weather,
             "odds_market": {"prob_a": match.get("odds_prob_a", 0),
                            "prob_b": match.get("odds_prob_b", 0)},

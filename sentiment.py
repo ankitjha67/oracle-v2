@@ -94,6 +94,15 @@ def extract_espn_odds(sport_espn_path, dates=None):
             elif not fav_at_open_h and home_fav:
                 line_moved = "HOME_SHIFT"  # Market moved toward home
 
+            # Determine line_type from status and timing
+            status = event.get("status", {}).get("type", {}).get("name", "")
+            if "FINAL" in status.upper() or "COMPLETE" in status.upper():
+                line_type = "closing"
+            elif fav_at_open_h is not None and line_moved != "STABLE":
+                line_type = "mid"
+            else:
+                line_type = "opening"
+
             all_odds.append({
                 "home": n0 if t0.get("homeAway") == "home" else n1,
                 "away": n1 if t0.get("homeAway") == "home" else n0,
@@ -101,8 +110,11 @@ def extract_espn_odds(sport_espn_path, dates=None):
                 "over_under": float(over_under),
                 "home_implied_pct": round(home_implied, 1),
                 "away_implied_pct": round(100 - home_implied, 1),
+                "home_decimal_odds": round(100 / home_implied, 2) if home_implied > 0 else 0,
+                "away_decimal_odds": round(100 / (100 - home_implied), 2) if home_implied < 100 else 0,
                 "home_favorite": home_fav,
                 "line_movement": line_moved,
+                "line_type": line_type,
                 "provider": o.get("provider", {}).get("name", "Unknown"),
                 "date": event.get("date", "")[:10],
             })
@@ -262,9 +274,31 @@ def enrich_predictions_with_sentiment(predictions, sport_espn_path, odds_api_key
                 "espn_over_under": espn["over_under"],
                 "espn_provider": espn["provider"],
                 "line_movement": espn["line_movement"],
+                "line_type": espn.get("line_type", "snapshot"),
                 "implied_prob_a": sentiment_prob_a,
+                "home_decimal_odds": espn.get("home_decimal_odds", 0),
+                "away_decimal_odds": espn.get("away_decimal_odds", 0),
                 **blend,
             }
+
+            # Compute EV for this prediction
+            try:
+                from analytics import EVCalculator, KellyStaker
+                home_odds = espn.get("home_decimal_odds", 0)
+                away_odds = espn.get("away_decimal_odds", 0)
+                if home_odds > 1:
+                    ev_home = EVCalculator.calculate_ev(model_prob_a / 100, home_odds)
+                    kelly_home = KellyStaker.kelly_fraction(model_prob_a / 100, home_odds)
+                    pred["sentiment"]["ev_home"] = ev_home["ev"]
+                    pred["sentiment"]["kelly_home_pct"] = round(kelly_home * 100, 2)
+                if away_odds > 1:
+                    ev_away = EVCalculator.calculate_ev((100 - model_prob_a) / 100, away_odds)
+                    kelly_away = KellyStaker.kelly_fraction((100 - model_prob_a) / 100, away_odds)
+                    pred["sentiment"]["ev_away"] = ev_away["ev"]
+                    pred["sentiment"]["kelly_away_pct"] = round(kelly_away * 100, 2)
+            except ImportError:
+                pass
+
             enriched += 1
 
         # Add bookmaker consensus if available

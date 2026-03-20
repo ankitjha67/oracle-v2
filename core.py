@@ -152,9 +152,12 @@ class OracleDB:
                 implied_prob_a REAL,
                 implied_prob_b REAL,
                 implied_prob_draw REAL DEFAULT 0,
+                line_type TEXT DEFAULT 'snapshot',
+                hours_before_start REAL DEFAULT -1,
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_odds_match ON odds_history(match_id);
+            CREATE INDEX IF NOT EXISTS idx_odds_line_type ON odds_history(line_type);
 
             CREATE TABLE IF NOT EXISTS api_cache (
                 cache_key TEXT PRIMARY KEY,
@@ -375,14 +378,17 @@ class OracleDB:
                 INSERT INTO odds_history
                 (match_id,sport,team_a,team_b,bookmaker,
                  odds_a,odds_b,odds_draw,
-                 implied_prob_a,implied_prob_b,implied_prob_draw)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                 implied_prob_a,implied_prob_b,implied_prob_draw,
+                 line_type,hours_before_start)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (odds.get("match_id",""), odds.get("sport",""),
                   odds["team_a"], odds["team_b"], odds.get("bookmaker",""),
                   odds.get("odds_a",0), odds.get("odds_b",0),
                   odds.get("odds_draw",0),
                   odds.get("implied_prob_a",0.5), odds.get("implied_prob_b",0.5),
-                  odds.get("implied_prob_draw",0)))
+                  odds.get("implied_prob_draw",0),
+                  odds.get("line_type","snapshot"),
+                  odds.get("hours_before_start",-1)))
 
     def get_odds_history(self, match_id: str) -> list[dict]:
         conn = self._get_conn()
@@ -795,18 +801,10 @@ class WalkForwardBacktester:
             result.brier_score = cal.brier_score(predicted, actual)
             result.log_loss = cal.log_loss_score(predicted, actual)
 
-            # Calibration error (ECE)
-            n_bins = 5
-            bins = np.linspace(0, 1, n_bins + 1)
-            bin_idx = np.digitize(predicted, bins) - 1
-            ece = 0
-            for b in range(n_bins):
-                mask = bin_idx == b
-                if mask.sum() > 0:
-                    avg_pred = predicted[mask].mean()
-                    avg_actual = actual[mask].mean()
-                    ece += mask.sum() / len(predicted) * abs(avg_pred - avg_actual)
-            result.calibration_error = ece
+            # Calibration error (ECE) — 15 bins for finer resolution
+            from analytics import EvaluationSuite
+            cal_data = EvaluationSuite.calibration_data(predicted, actual, n_bins=15)
+            result.calibration_error = cal_data["ece"]
 
         return result
 

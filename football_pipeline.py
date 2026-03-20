@@ -510,15 +510,43 @@ def main():
 
     print(f"  └{'─'*78}┘")
 
-    # Where Oracle disagrees with market (value bets)
-    print(f"\n  ⚡ VALUE SPOTS (Oracle disagrees with market by >10%):")
-    for p in predictions:
-        o = p["oracle_prediction"]
-        sr = p.get("sportRadar_prob", {})
-        if abs(o["home_pct"] - sr.get("H",0)) > 10 or abs(o["away_pct"] - sr.get("A",0)) > 10:
-            print(f"    {p['match']}")
-            print(f"      Oracle: H={o['home_pct']}% D={o['draw_pct']}% A={o['away_pct']}%")
-            print(f"      Market: H={sr.get('H')}% D={sr.get('D')}% A={sr.get('A')}%")
+    # Value bets via proper Expected Value calculation
+    print(f"\n  ⚡ VALUE BETS (Positive Expected Value):")
+    try:
+        from analytics import EVCalculator, KellyStaker
+        for p in predictions:
+            o = p["oracle_prediction"]
+            sr = p.get("sportRadar_prob", {})
+            sr_h, sr_d, sr_a = sr.get("H", 33), sr.get("D", 33), sr.get("A", 33)
+            # Convert market percentages to decimal odds
+            odds_h = 100 / sr_h if sr_h > 0 else 3.0
+            odds_d = 100 / sr_d if sr_d > 0 else 3.3
+            odds_a = 100 / sr_a if sr_a > 0 else 3.0
+            # EV for each outcome
+            ev_h = EVCalculator.calculate_ev(o["home_pct"] / 100, odds_h)
+            ev_d = EVCalculator.calculate_ev(o["draw_pct"] / 100, odds_d)
+            ev_a = EVCalculator.calculate_ev(o["away_pct"] / 100, odds_a)
+            best = max([ev_h, ev_d, ev_a], key=lambda x: x["ev"])
+            if best["ev"] > 0:
+                side = "HOME" if best is ev_h else ("DRAW" if best is ev_d else "AWAY")
+                kelly = KellyStaker.kelly_fraction(best["model_prob"], best["decimal_odds"])
+                p["value_bet"] = {
+                    "side": side, "ev": best["ev"],
+                    "edge_pct": round(best["edge_pct"] * 100, 1),
+                    "kelly_pct": round(kelly * 100, 2),
+                }
+                print(f"    {p['match']}")
+                print(f"      {side}: EV={best['ev']:+.3f} | Edge={best['edge_pct']*100:.1f}% | Kelly={kelly*100:.1f}%")
+                print(f"      Oracle: H={o['home_pct']}% D={o['draw_pct']}% A={o['away_pct']}%")
+    except ImportError:
+        # Fallback to simple disagreement check
+        for p in predictions:
+            o = p["oracle_prediction"]
+            sr = p.get("sportRadar_prob", {})
+            if abs(o["home_pct"] - sr.get("H",0)) > 10 or abs(o["away_pct"] - sr.get("A",0)) > 10:
+                print(f"    {p['match']}")
+                print(f"      Oracle: H={o['home_pct']}% D={o['draw_pct']}% A={o['away_pct']}%")
+                print(f"      Market: H={sr.get('H')}% D={sr.get('D')}% A={sr.get('A')}%")
 
     # 5. Save everything
     print(f"\n  [5/5] Saving complete output...")
@@ -696,7 +724,29 @@ def backtest_roi_on_training_data(df, elo, team_stats, models, scaler):
             "odds_for_predicted": odds_for_pred,
         })
     
-    return calculate_roi(results)
+    roi = calculate_roi(results)
+
+    # Run bankroll simulation on the backtest results
+    try:
+        from analytics import BankrollSimulator, EVCalculator
+        sim_bets = []
+        for r in results:
+            actual = r.get("actual_result", "")
+            predicted = r.get("predicted_result", "")
+            odds = r.get("odds_for_predicted", 2.0)
+            # Simple model probability from Elo
+            sim_bets.append({
+                "model_prob": 1.0 / odds if odds > 0 else 0.5,
+                "decimal_odds": odds,
+                "won": actual == predicted,
+            })
+        if sim_bets:
+            sim = BankrollSimulator(10000)
+            roi["bankroll_simulation"] = sim.simulate(sim_bets, "kelly_quarter")
+    except ImportError:
+        pass
+
+    return roi
 
 
 # ═══════════════════════════════════════════════════════════════════════

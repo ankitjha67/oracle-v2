@@ -1,0 +1,366 @@
+"""Tests for analytics module — Phase 1: CLV, EV, Kelly, Evaluation Suite, Bankroll."""
+import numpy as np
+import pytest
+
+from analytics import (
+    AnalyticsEngine,
+    BankrollSimulator,
+    CLVTracker,
+    EVCalculator,
+    EvaluationSuite,
+    KellyStaker,
+    MarketEfficiencyAnalyzer,
+)
+
+
+class TestEVCalculator:
+    """Expected Value calculation tests."""
+
+    def test_positive_ev(self):
+        # Model says 60% chance, odds imply 50% → positive EV
+        result = EVCalculator.calculate_ev(0.6, 2.0)
+        assert result["ev"] > 0
+        assert result["is_value"] is True
+        assert result["edge_pct"] > 0
+
+    def test_negative_ev(self):
+        # Model says 40% chance, odds imply 50% → negative EV
+        result = EVCalculator.calculate_ev(0.4, 2.0)
+        assert result["ev"] < 0
+        assert result["is_value"] is False
+
+    def test_exact_ev_calculation(self):
+        # EV = (0.6 * 2.5) - 1 = 0.5
+        result = EVCalculator.calculate_ev(0.6, 2.5)
+        assert abs(result["ev"] - 0.5) < 0.001
+
+    def test_edge_calculation(self):
+        # Model 60%, market implies 50% (odds 2.0) → edge = 0.10
+        result = EVCalculator.calculate_ev(0.6, 2.0)
+        assert abs(result["edge_pct"] - 0.1) < 0.001
+
+    def test_invalid_odds(self):
+        result = EVCalculator.calculate_ev(0.6, 0)
+        assert result["ev"] == 0
+
+    def test_find_value_bets(self):
+        preds = [
+            {"model_prob": 0.6, "decimal_odds": 2.0, "match": "A vs B"},
+            {"model_prob": 0.4, "decimal_odds": 2.0, "match": "C vs D"},  # no edge
+            {"model_prob": 0.7, "decimal_odds": 1.8, "match": "E vs F"},
+        ]
+        value = EVCalculator.find_value_bets(preds, min_edge=0.03)
+        assert len(value) >= 1
+        assert all(v["is_value"] for v in value)
+
+    def test_roi_by_edge_bucket(self):
+        bets = [
+            {"edge_pct": 0.02, "decimal_odds": 2.0, "won": True},
+            {"edge_pct": 0.04, "decimal_odds": 2.5, "won": False},
+            {"edge_pct": 0.08, "decimal_odds": 3.0, "won": True},
+            {"edge_pct": 0.12, "decimal_odds": 4.0, "won": True},
+        ]
+        result = EVCalculator.roi_by_edge_bucket(bets)
+        assert "0-3%" in result
+        assert "3-5%" in result
+        assert "5-10%" in result
+        assert "10%+" in result
+        assert result["10%+"]["n"] == 1
+
+
+class TestKellyStaker:
+    """Kelly Criterion tests."""
+
+    def test_positive_edge_returns_stake(self):
+        # 60% chance at 2.0 odds → positive Kelly
+        frac = KellyStaker.kelly_fraction(0.6, 2.0)
+        assert frac > 0
+
+    def test_no_edge_returns_zero(self):
+        # 40% at 2.0 → negative edge, no bet
+        frac = KellyStaker.kelly_fraction(0.4, 2.0)
+        assert frac == 0
+
+    def test_quarter_kelly_smaller_than_full(self):
+        full = KellyStaker.kelly_fraction(0.6, 2.0, fraction=1.0)
+        quarter = KellyStaker.kelly_fraction(0.6, 2.0, fraction=0.25)
+        assert quarter < full
+        assert abs(quarter - full * 0.25) < 0.001
+
+    def test_exact_kelly(self):
+        # f = (p*b - q) / b where b=1, p=0.6, q=0.4
+        # f = (0.6*1 - 0.4) / 1 = 0.2
+        full = KellyStaker.kelly_fraction(0.6, 2.0, fraction=1.0)
+        assert abs(full - 0.2) < 0.001
+
+    def test_invalid_inputs(self):
+        assert KellyStaker.kelly_fraction(0.5, 0) == 0
+        assert KellyStaker.kelly_fraction(0, 2.0) == 0
+        assert KellyStaker.kelly_fraction(1, 2.0) == 0
+
+    def test_risk_of_ruin_positive_ev(self):
+        # Smaller bankroll to get non-zero risk of ruin
+        ror = KellyStaker.risk_of_ruin(0.52, 2.0, bankroll_units=10)
+        assert 0 <= ror < 1
+
+    def test_risk_of_ruin_negative_ev(self):
+        ror = KellyStaker.risk_of_ruin(0.4, 2.0)
+        assert ror == 1.0
+
+
+class TestCLVTracker:
+    """CLV tracking tests."""
+
+    def test_compute_clv_positive(self):
+        tracker = CLVTracker()
+        # Model said 60%, closing line was 55% → positive CLV
+        clv = tracker.compute_clv(0.60, 0.55)
+        assert clv == pytest.approx(0.05, abs=0.001)
+
+    def test_compute_clv_negative(self):
+        tracker = CLVTracker()
+        clv = tracker.compute_clv(0.50, 0.60)
+        assert clv < 0
+
+    def test_track_without_db(self):
+        tracker = CLVTracker()
+        # opening_odds 1.5 → implied 66.7%, closing_odds 1.6 → implied 62.5%
+        # model 65% vs closing 62.5% → positive CLV of 0.025
+        record = tracker.track("pred_1", "cricket", "India", "NZ",
+                               model_prob_a=0.65, opening_odds_a=1.5,
+                               closing_odds_a=1.6)
+        assert record["clv"] > 0  # Model was ahead of closing line
+        assert record["opening_implied_a"] > 0
+        assert record["closing_implied_a"] > 0
+
+    def test_track_with_db(self, tmp_db):
+        tracker = CLVTracker(tmp_db)
+        record = tracker.track("pred_1", "cricket", "India", "NZ",
+                               model_prob_a=0.65, opening_odds_a=1.5,
+                               closing_odds_a=1.45)
+        assert record["prediction_id"] == "pred_1"
+
+    def test_summary_no_closing_odds(self, tmp_db):
+        # Insert a record with closing_odds=0 (no closing line captured)
+        tracker = CLVTracker(tmp_db)
+        tracker.track("no_close", "cricket", "A", "B",
+                      model_prob_a=0.5, opening_odds_a=2.0, closing_odds_a=0)
+        # Summary filters for closing_odds > 0, so this shouldn't inflate count
+        summary = tracker.summary(sport="nonexistent_sport")
+        assert summary["n"] == 0
+
+
+class TestBankrollSimulator:
+    """Bankroll simulation tests."""
+
+    def test_simulate_winning_bets(self):
+        sim = BankrollSimulator(10000)
+        bets = [{"model_prob": 0.6, "decimal_odds": 2.0, "won": True}] * 20
+        result = sim.simulate(bets)
+        assert result["final_bankroll"] > 10000
+        assert result["bets_placed"] == 20
+        assert not result["busted"]
+
+    def test_simulate_losing_bets(self):
+        sim = BankrollSimulator(10000)
+        bets = [{"model_prob": 0.6, "decimal_odds": 2.0, "won": False}] * 20
+        result = sim.simulate(bets)
+        assert result["final_bankroll"] < 10000
+
+    def test_simulate_mixed(self):
+        sim = BankrollSimulator(10000)
+        bets = [
+            {"model_prob": 0.6, "decimal_odds": 2.0, "won": True},
+            {"model_prob": 0.55, "decimal_odds": 2.2, "won": False},
+            {"model_prob": 0.7, "decimal_odds": 1.8, "won": True},
+            {"model_prob": 0.6, "decimal_odds": 2.5, "won": True},
+            {"model_prob": 0.65, "decimal_odds": 1.9, "won": False},
+        ] * 10
+        result = sim.simulate(bets, "kelly_quarter")
+        assert result["bets_placed"] > 0
+        assert result["max_drawdown_pct"] >= 0
+        assert result["strategy"] == "kelly_quarter"
+
+    def test_flat_strategy(self):
+        sim = BankrollSimulator(10000)
+        bets = [{"model_prob": 0.6, "decimal_odds": 2.0, "won": True}] * 5
+        result = sim.simulate(bets, "flat_1pct")
+        assert result["bets_placed"] == 5
+
+    def test_monte_carlo(self):
+        sim = BankrollSimulator(10000)
+        bets = [
+            {"model_prob": 0.6, "decimal_odds": 2.0, "won": True},
+            {"model_prob": 0.6, "decimal_odds": 2.0, "won": False},
+        ] * 10
+        mc = sim.monte_carlo(bets, n_sims=100, seed=42)
+        assert mc["n_sims"] == 100
+        assert "percentiles" in mc
+        assert mc["percentiles"]["p5"] <= mc["percentiles"]["p95"]
+        assert 0 <= mc["bust_rate"] <= 1
+        assert 0 <= mc["profit_rate"] <= 1
+
+
+class TestEvaluationSuite:
+    """Evaluation suite tests."""
+
+    def test_brier_score_perfect(self):
+        predicted = np.array([1.0, 0.0, 1.0, 0.0])
+        actual = np.array([1, 0, 1, 0])
+        assert EvaluationSuite.brier_score(predicted, actual) == 0.0
+
+    def test_brier_score_worst(self):
+        predicted = np.array([0.0, 1.0])
+        actual = np.array([1, 0])
+        assert EvaluationSuite.brier_score(predicted, actual) == 1.0
+
+    def test_brier_skill_score_better_than_naive(self):
+        # A model that's better than always predicting the base rate
+        predicted = np.array([0.9, 0.8, 0.2, 0.1])
+        actual = np.array([1, 1, 0, 0])
+        bss = EvaluationSuite.brier_skill_score(predicted, actual)
+        assert bss > 0  # Better than naive
+
+    def test_brier_skill_score_worse_than_naive(self):
+        predicted = np.array([0.1, 0.2, 0.8, 0.9])
+        actual = np.array([1, 1, 0, 0])
+        bss = EvaluationSuite.brier_skill_score(predicted, actual)
+        assert bss < 0  # Worse than naive
+
+    def test_log_loss(self):
+        predicted = np.array([0.9, 0.7, 0.3, 0.1])
+        actual = np.array([1, 1, 0, 0])
+        ll = EvaluationSuite.log_loss(predicted, actual)
+        assert ll > 0
+
+    def test_roc_auc_perfect(self):
+        predicted = np.array([0.9, 0.8, 0.2, 0.1])
+        actual = np.array([1, 1, 0, 0])
+        auc = EvaluationSuite.roc_auc(predicted, actual)
+        assert auc == 1.0
+
+    def test_roc_auc_random(self):
+        rng = np.random.default_rng(42)
+        predicted = rng.random(1000)
+        actual = rng.integers(0, 2, 1000)
+        auc = EvaluationSuite.roc_auc(predicted, actual)
+        assert 0.4 < auc < 0.6  # Near random
+
+    def test_calibration_data(self):
+        predicted = np.array([0.1, 0.3, 0.5, 0.7, 0.9] * 20)
+        actual = np.array([0, 0, 1, 1, 1] * 20)
+        cal = EvaluationSuite.calibration_data(predicted, actual, n_bins=10)
+        assert "ece" in cal
+        assert "mce" in cal
+        assert "sharpness" in cal
+        assert "resolution" in cal
+        assert len(cal["bins"]) == 10
+        assert cal["n_predictions"] == 100
+
+    def test_full_evaluation(self):
+        predicted = np.array([0.8, 0.6, 0.3, 0.2, 0.9, 0.1])
+        actual = np.array([1, 1, 0, 0, 1, 0])
+        result = EvaluationSuite.full_evaluation(predicted, actual, sport="test")
+        assert result["sport"] == "test"
+        assert "accuracy" in result
+        assert "brier_score" in result
+        assert "brier_skill_score" in result
+        assert "log_loss" in result
+        assert "roc_auc" in result
+        assert "calibration" in result
+
+    def test_full_evaluation_empty(self):
+        result = EvaluationSuite.full_evaluation(np.array([]), np.array([]))
+        assert "error" in result
+
+    def test_evaluate_by_confidence_tier(self):
+        preds = [
+            {"prob_a": 0.8, "actual_outcome": 1, "confidence": "HIGH"},
+            {"prob_a": 0.7, "actual_outcome": 1, "confidence": "HIGH"},
+            {"prob_a": 0.55, "actual_outcome": 0, "confidence": "LOW"},
+            {"prob_a": 0.6, "actual_outcome": 1, "confidence": "LOW"},
+        ]
+        result = EvaluationSuite.evaluate_by_confidence_tier(preds)
+        assert "HIGH" in result
+        assert "LOW" in result
+
+    def test_evaluate_by_sport(self):
+        preds = [
+            {"prob_a": 0.8, "actual_outcome": 1, "sport": "cricket"},
+            {"prob_a": 0.6, "actual_outcome": 0, "sport": "football"},
+        ]
+        result = EvaluationSuite.evaluate_by_sport(preds)
+        assert "cricket" in result
+        assert "football" in result
+
+
+class TestMarketEfficiencyAnalyzer:
+    """Market efficiency analysis tests."""
+
+    def test_compare_calibrations(self):
+        model = np.array([0.8, 0.6, 0.3, 0.2])
+        market = np.array([0.7, 0.5, 0.4, 0.3])
+        actual = np.array([1, 1, 0, 0])
+        result = MarketEfficiencyAnalyzer.compare_calibrations(model, market, actual)
+        assert "model_ece" in result
+        assert "market_ece" in result
+        assert "model_better" in result
+
+    def test_edge_report(self):
+        bets = [
+            {"sport": "NBA", "league": "NBA", "confidence": "HIGH",
+             "edge_pct": 0.05, "won": True, "decimal_odds": 2.0},
+            {"sport": "NBA", "league": "NBA", "confidence": "LOW",
+             "edge_pct": 0.02, "won": False, "decimal_odds": 2.5},
+            {"sport": "NHL", "league": "NHL", "confidence": "HIGH",
+             "edge_pct": 0.08, "won": True, "decimal_odds": 1.8},
+        ]
+        report = MarketEfficiencyAnalyzer.edge_report(bets)
+        assert "by_sport" in report
+        assert "by_league" in report
+        assert "by_confidence" in report
+        assert "NBA" in report["by_sport"]
+
+
+class TestAnalyticsEngine:
+    """Analytics engine coordinator tests."""
+
+    def test_init_without_db(self):
+        engine = AnalyticsEngine()
+        assert engine.ev is not None
+        assert engine.kelly is not None
+        assert engine.bankroll is not None
+
+    def test_analyze_prediction_with_odds(self):
+        engine = AnalyticsEngine()
+        pred = {"team_a": "India", "team_b": "NZ", "prob_a": 0.65}
+        odds = {"odds_a": 1.6, "odds_b": 2.5}
+        result = engine.analyze_prediction(pred, odds)
+        assert "ev_team_a" in result
+        assert "ev_team_b" in result
+        assert "kelly_team_a" in result
+        assert "best_bet" in result
+
+    def test_analyze_prediction_no_odds(self):
+        engine = AnalyticsEngine()
+        pred = {"team_a": "India", "team_b": "NZ", "prob_a": 0.65}
+        result = engine.analyze_prediction(pred)
+        assert result == {}
+
+    def test_evaluation_report_no_db(self):
+        engine = AnalyticsEngine()
+        report = engine.evaluation_report()
+        assert "error" in report
+
+    def test_bankroll_report(self):
+        engine = AnalyticsEngine()
+        bets = [
+            {"model_prob": 0.6, "decimal_odds": 2.0, "won": True},
+            {"model_prob": 0.55, "decimal_odds": 2.2, "won": False},
+            {"model_prob": 0.65, "decimal_odds": 1.8, "won": True},
+        ] * 5
+        report = engine.bankroll_report(bets)
+        assert "simulation" in report
+        assert "monte_carlo" in report
+        assert "roi_by_edge_bucket" in report
+        assert "risk_of_ruin" in report
