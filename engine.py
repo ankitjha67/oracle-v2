@@ -552,6 +552,7 @@ class OracleV2:
         self.scaler = StandardScaler()
         self.models: dict[str, Any] = {}
         self.meta_learner = None
+        self._shap_explainer = None
         self.is_trained = False
         self.training_stats = {}
 

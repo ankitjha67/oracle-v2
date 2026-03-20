@@ -57,7 +57,7 @@ class SportElo:
         self.ratings = defaultdict(lambda: default)
         self.matches = defaultdict(int)
         self.K = K; self.home_adv = home_adv
-        self._rating_callback = None  # Optional: analytics rating tracker
+        self._rating_callback = None  # Optional: callable(team, rating) for history tracking
 
     def set_prior_from_record(self, name, record_str):
         """Set initial Elo from fighter/player record. E.g. '13-1-0' → higher prior."""

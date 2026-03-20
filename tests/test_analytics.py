@@ -884,3 +884,254 @@ class TestAnalyticsEnginePhase3:
     def test_playoff_is_correct_type(self):
         engine = AnalyticsEngine()
         assert isinstance(engine.playoff, PlayoffCalculator)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Integration Tests: DB-connected paths
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMarketEfficiencyMonitorDB:
+    """Market efficiency monitor with real database."""
+
+    def _seed_predictions(self, db, n=50, prefix="pred"):
+        """Insert scored predictions into the database."""
+        rng = np.random.default_rng(42)
+        conn = db._get_conn()
+        for i in range(n):
+            prob_a = round(rng.uniform(0.3, 0.8), 3)
+            is_correct = int(rng.random() < prob_a)
+            sport = "cricket" if i % 3 == 0 else "NBA"
+            confidence = "HIGH" if prob_a > 0.6 else "LOW"
+            conn.execute("""
+                INSERT OR IGNORE INTO predictions
+                (id, team_a, team_b, sport, prob_a, confidence, is_correct,
+                 odds_json, created_at)
+                VALUES (?,?,?,?,?,?,?,?,datetime('now', ?))
+            """, (f"{prefix}_{i}", f"TeamA_{i}", f"TeamB_{i}", sport,
+                  prob_a, confidence, is_correct, "{}",
+                  f"-{n - i} minutes"))
+        conn.commit()
+
+    def test_rolling_performance_with_data(self, tmp_db):
+        self._seed_predictions(tmp_db, 60)
+        monitor = MarketEfficiencyMonitor(tmp_db)
+        result = monitor.rolling_performance(n=100, window_sizes=[10, 20])
+        assert result["n_predictions"] == 60
+        assert "10" in result["windows"]
+        assert "20" in result["windows"]
+        w10 = result["windows"]["10"]
+        assert w10["current"] is not None
+        assert 0 <= w10["current"]["accuracy"] <= 1
+
+    def test_rolling_performance_by_sport(self, tmp_db):
+        self._seed_predictions(tmp_db, 40, prefix="sport")
+        monitor = MarketEfficiencyMonitor(tmp_db)
+        result = monitor.rolling_performance(sport="cricket", n=100)
+        # Should have fewer predictions (only cricket)
+        assert result["n_predictions"] < 40
+
+    def test_edge_by_niche_with_data(self, tmp_db):
+        self._seed_predictions(tmp_db, 50, prefix="niche")
+        monitor = MarketEfficiencyMonitor(tmp_db)
+        result = monitor.edge_by_niche(n=100)
+        assert len(result) > 0
+        # Each niche should have sport and confidence
+        for niche_key, data in result.items():
+            assert "sport" in data
+            assert "confidence" in data
+            assert "accuracy" in data
+            assert "sharpe" in data
+            assert ":" in niche_key
+
+    def test_detect_degradation_from_db(self, tmp_db):
+        """Run degradation detection on DB predictions."""
+        self._seed_predictions(tmp_db, 40, prefix="degrade")
+        monitor = MarketEfficiencyMonitor(tmp_db)
+        # Get accuracy from rolling performance
+        result = monitor.rolling_performance(n=100, window_sizes=[10])
+        assert result["n_predictions"] > 0
+        w10 = result["windows"].get("10")
+        assert w10 is not None
+        assert w10["n_windows"] > 0
+
+
+class TestPredictionTimeSeriesDB:
+    """PredictionTimeSeries with real database."""
+
+    def test_schema_created_on_init(self, tmp_db):
+        ts = PredictionTimeSeries(tmp_db)
+        conn = tmp_db._get_conn()
+        # Verify table exists
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='prediction_timeseries'"
+        ).fetchone()
+        assert tables is not None
+
+    def test_multiple_matches(self, tmp_db):
+        ts = PredictionTimeSeries(tmp_db)
+        ts.log_snapshot("multi_a", "cricket", "India", "NZ", 0.65)
+        ts.log_snapshot("multi_b", "NBA", "Lakers", "Celtics", 0.55)
+        ts.log_snapshot("multi_a", "cricket", "India", "NZ", 0.70)
+
+        m1 = ts.get_evolution("multi_a")
+        m2 = ts.get_evolution("multi_b")
+        assert len(m1) >= 2
+        assert len(m2) >= 1
+        # multi_a has more snapshots than multi_b
+        assert len(m1) > len(m2)
+
+    def test_drift_toward_b(self, tmp_db):
+        ts = PredictionTimeSeries(tmp_db)
+        ts.log_snapshot("m5", "NFL", "A", "B", 0.70, days_until_match=7)
+        ts.log_snapshot("m5", "NFL", "A", "B", 0.55, days_until_match=3)
+        ts.log_snapshot("m5", "NFL", "A", "B", 0.40, days_until_match=0)
+
+        drift = ts.probability_drift("m5")
+        assert drift["direction"] == "TOWARD_B"
+        assert drift["drift"] < 0
+        assert drift["total_swing"] == pytest.approx(0.3, abs=0.01)
+
+
+class TestAnalyticsEngineIntegration:
+    """End-to-end integration: AnalyticsEngine with real DB."""
+
+    def test_full_engine_with_db(self, tmp_db):
+        engine = AnalyticsEngine(tmp_db)
+        assert engine.shap is not None
+        assert engine.changepoint is not None
+        assert engine.season_sim is not None
+        assert engine.efficiency_monitor is not None
+        assert engine.timeseries is not None
+
+    def test_analyze_then_evaluate(self, tmp_db):
+        """Analyze predictions, then run evaluation."""
+        engine = AnalyticsEngine(tmp_db)
+        # Insert some predictions
+        conn = tmp_db._get_conn()
+        for i in range(20):
+            prob = 0.6 + (i % 5) * 0.05
+            correct = 1 if i % 3 != 0 else 0
+            conn.execute("""
+                INSERT INTO predictions
+                (id, team_a, team_b, sport, prob_a, confidence,
+                 is_correct, odds_json)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (f"test_{i}", "A", "B", "cricket", prob,
+                  "HIGH", correct, "{}"))
+        conn.commit()
+
+        report = engine.evaluation_report(sport="cricket", n=50)
+        assert "error" not in report
+        assert "overall" in report
+        overall = report["overall"]
+        assert "accuracy" in overall
+        assert "brier_score" in overall
+
+    def test_changepoint_lifecycle(self, tmp_db):
+        """Log ratings, detect changepoint, check K-boost."""
+        engine = AnalyticsEngine(tmp_db)
+        cpd = engine.changepoint
+
+        # Log stable ratings
+        for i in range(15):
+            cpd.log_rating("TestTeam", "test", 1500 + i * 0.5, "elo")
+        # Log sudden jump
+        for i in range(10):
+            cpd.log_rating("TestTeam", "test", 1600 + i, "elo")
+
+        result = cpd.detect("TestTeam", "test")
+        assert result["n_history"] == 25
+        assert "trend" in result
+
+    def test_timeseries_through_engine(self, tmp_db):
+        """Log prediction snapshots through the engine."""
+        engine = AnalyticsEngine(tmp_db)
+        ts = engine.timeseries
+
+        ts.log_snapshot("match_xyz", "cricket", "India", "Aus", 0.62, "HIGH")
+        ts.log_snapshot("match_xyz", "cricket", "India", "Aus", 0.68, "HIGH")
+
+        evo = ts.get_evolution("match_xyz")
+        assert len(evo) == 2
+
+        drift = ts.probability_drift("match_xyz")
+        assert drift["drift"] > 0
+
+
+class TestRatingEngineWithChangepoint:
+    """Verify core.py RatingEngine hooks work with analytics."""
+
+    def test_elo_update_logs_rating_history(self, tmp_db):
+        """elo_update should log to rating_history when tracker is set."""
+        from core import RatingEngine
+        from analytics import RatingChangePointDetector
+
+        ratings = RatingEngine(tmp_db)
+        cpd = RatingChangePointDetector(tmp_db)
+        ratings._rating_tracker = cpd
+
+        # Use unique team names to avoid cross-test contamination
+        before = len(cpd.get_history("RH_Team1", "rh_test"))
+        ratings.elo_update("RH_Team1", "RH_Team2", "rh_test", K=32)
+        ratings.elo_update("RH_Team1", "RH_Team3", "rh_test", K=32)
+
+        history = cpd.get_history("RH_Team1", "rh_test")
+        assert len(history) - before == 2  # Two new updates logged
+
+    def test_elo_update_with_k_boost(self, tmp_db):
+        """K-boost from changepoint should amplify rating change."""
+        from core import RatingEngine
+        from analytics import RatingChangePointDetector
+
+        ratings = RatingEngine(tmp_db)
+        cpd = RatingChangePointDetector(tmp_db)
+        ratings._changepoint_detector = cpd
+
+        # No boost — get baseline change
+        w1, l1 = ratings.elo_update("TeamA", "TeamB", "test", K=32)
+        delta_no_boost = w1 - 1500  # Initial rating is 1500
+
+        # Reset ratings
+        tmp_db.update_rating("TeamC", "test", "elo", rating=1500, matches_played=0)
+        tmp_db.update_rating("TeamD", "test", "elo", rating=1500, matches_played=0)
+
+        # Insert active K-boost for TeamC
+        with tmp_db.transaction() as conn:
+            conn.execute("""
+                INSERT INTO changepoints
+                (team, sport, detected_at, rating_before, rating_after,
+                 direction, k_boost_remaining)
+                VALUES (?,?,?,?,?,?,?)
+            """, ("TeamC", "test", "2026-01-01", 1500, 1600, "UP", 3))
+
+        w2, l2 = ratings.elo_update("TeamC", "TeamD", "test", K=32)
+        delta_with_boost = w2 - 1500
+
+        # Boosted delta should be larger (1.5x K)
+        assert delta_with_boost > delta_no_boost
+
+    def test_elo_update_decrements_k_boost(self, tmp_db):
+        """After elo_update, K-boost remaining should decrease."""
+        from core import RatingEngine
+        from analytics import RatingChangePointDetector
+
+        ratings = RatingEngine(tmp_db)
+        cpd = RatingChangePointDetector(tmp_db)
+        ratings._changepoint_detector = cpd
+
+        with tmp_db.transaction() as conn:
+            conn.execute("""
+                INSERT INTO changepoints
+                (team, sport, detected_at, rating_before, rating_after,
+                 direction, k_boost_remaining)
+                VALUES (?,?,?,?,?,?,?)
+            """, ("TeamE", "test", "2026-01-01", 1500, 1600, "UP", 3))
+
+        ratings.elo_update("TeamE", "TeamF", "test", K=32)
+
+        # Check k_boost_remaining decremented
+        conn = tmp_db._get_conn()
+        row = conn.execute(
+            "SELECT k_boost_remaining FROM changepoints WHERE team='TeamE'"
+        ).fetchone()
+        assert row["k_boost_remaining"] == 2
