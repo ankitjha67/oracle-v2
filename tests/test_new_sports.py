@@ -1,5 +1,4 @@
 """Tests for new sport integrations — multi-sport expansion and domestic cricket."""
-import pytest
 
 from multi_sport import SPORTS, SportElo, get_active_sports
 
@@ -73,7 +72,7 @@ class TestActiveSeasons:
         assert "NCAAF" in active
 
     def test_wnba_in_season(self):
-        active = get_active_sports(month=6)
+        get_active_sports(month=6)
         assert "WNBA" in get_active_sports(month=5)
 
     def test_mls_always_active(self):
@@ -99,10 +98,8 @@ class TestNewSportEloIntegration:
     def test_rugby_elo(self):
         cfg = SPORTS["RUGBY"]
         elo = SportElo(1500, cfg["K"], cfg["home"])
-        elo.update("New Zealand All Blacks", "South Africa Springboks",
-                   home_team="New Zealand All Blacks", margin=10)
-        pa, pb = elo.predict("New Zealand All Blacks", "South Africa Springboks",
-                             home="New Zealand All Blacks")
+        elo.update("New Zealand All Blacks", "South Africa Springboks", home_team="New Zealand All Blacks", margin=10)
+        pa, _pb = elo.predict("New Zealand All Blacks", "South Africa Springboks", home="New Zealand All Blacks")
         assert pa > 50
 
     def test_afl_strong_home_advantage(self):
@@ -140,6 +137,7 @@ class TestDomesticCricketLeagues:
 
     def test_leagues_defined(self):
         from cricsheet_pipeline import DOMESTIC_LEAGUES
+
         assert "ipl" in DOMESTIC_LEAGUES
         assert "bbl" in DOMESTIC_LEAGUES
         assert "cpl" in DOMESTIC_LEAGUES
@@ -149,6 +147,7 @@ class TestDomesticCricketLeagues:
 
     def test_league_has_required_fields(self):
         from cricsheet_pipeline import DOMESTIC_LEAGUES
+
         required = {"name", "zip_url", "event_filter", "country"}
         for key, league in DOMESTIC_LEAGUES.items():
             for field in required:
@@ -156,14 +155,17 @@ class TestDomesticCricketLeagues:
 
     def test_league_urls_valid(self):
         from cricsheet_pipeline import DOMESTIC_LEAGUES
-        for key, league in DOMESTIC_LEAGUES.items():
+
+        for _key, league in DOMESTIC_LEAGUES.items():
             assert league["zip_url"].startswith("https://cricsheet.org/downloads/")
             assert league["zip_url"].endswith(".zip")
 
     def test_build_all_players_mode(self):
         """Test that build_player_database works with target_teams=None."""
-        from cricsheet_pipeline import build_player_database
         import tempfile
+
+        from cricsheet_pipeline import build_player_database
+
         # With empty dir, should return empty but not crash
         with tempfile.TemporaryDirectory() as tmpdir:
             players, n = build_player_database(tmpdir, min_year=2025, target_teams=None)

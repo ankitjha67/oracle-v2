@@ -19,17 +19,17 @@ APIs integrated (13 total):
 """
 
 from __future__ import annotations
-import json
-import time
-import csv
+
 import io
-import os
+import json
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any, Optional
+import math
+import os
+import time
+from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import requests
 
 logger = logging.getLogger("oracle.api")
@@ -45,8 +45,9 @@ NEWSDATA_KEY = os.getenv("NEWSDATA_KEY", "")
 THESPORTSDB_KEY = os.getenv("THESPORTSDB_KEY", "1")  # "1" = free tier
 
 
-def _cached_get(url: str, cache_key: str, ttl_hours: int = 6,
-                headers: dict = None, params: dict = None) -> Optional[dict]:
+def _cached_get(
+    url: str, cache_key: str, ttl_hours: int = 6, headers: dict | None = None, params: dict | None = None
+) -> dict | None:
     """HTTP GET with local file caching."""
     cache_file = CACHE_DIR / f"{cache_key}.json"
 
@@ -77,7 +78,7 @@ def _cached_get(url: str, cache_key: str, ttl_hours: int = 6,
         return None
 
 
-def _raw_get(url: str, headers: dict = None, params: dict = None) -> Optional[str]:
+def _raw_get(url: str, headers: dict | None = None, params: dict | None = None) -> str | None:
     """Raw HTTP GET returning text."""
     try:
         resp = requests.get(url, headers=headers or {}, params=params or {}, timeout=15)
@@ -93,13 +94,14 @@ def _raw_get(url: str, headers: dict = None, params: dict = None) -> Optional[st
 # https://open-meteo.com/
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class OpenMeteoAPI:
     """Real-time and forecast weather data for any venue on Earth."""
 
     BASE = "https://api.open-meteo.com/v1"
 
     # Venue coordinates database
-    VENUE_COORDS = {
+    VENUE_COORDS = {  # noqa: RUF012
         # Cricket
         "narendra modi stadium": (23.0927, 72.5959),
         "ahmedabad": (23.0927, 72.5959),
@@ -150,7 +152,7 @@ class OpenMeteoAPI:
     }
 
     @classmethod
-    def get_coords(cls, venue: str) -> Optional[tuple[float, float]]:
+    def get_coords(cls, venue: str) -> tuple[float, float] | None:
         """Lookup venue coordinates."""
         key = venue.lower().strip()
         for name, coords in cls.VENUE_COORDS.items():
@@ -159,7 +161,7 @@ class OpenMeteoAPI:
         return None
 
     @classmethod
-    def get_weather(cls, venue: str, date: str = None) -> Optional[dict]:
+    def get_weather(cls, venue: str, date: str | None = None) -> dict | None:
         """
         Get weather for a venue. Returns:
         {temperature, humidity, wind_speed, precipitation_prob,
@@ -174,8 +176,8 @@ class OpenMeteoAPI:
             "latitude": lat,
             "longitude": lon,
             "hourly": "temperature_2m,relative_humidity_2m,dew_point_2m,"
-                      "precipitation_probability,cloud_cover,wind_speed_10m,"
-                      "weather_code",
+            "precipitation_probability,cloud_cover,wind_speed_10m,"
+            "weather_code",
             "timezone": "auto",
         }
 
@@ -236,13 +238,20 @@ class OpenMeteoAPI:
     @staticmethod
     def _summarize(temp, humidity, precip, wind, cloud):
         parts = []
-        if temp: parts.append(f"{temp:.0f}°C")
-        if precip and precip > 50: parts.append("RAIN LIKELY")
-        elif precip and precip > 20: parts.append("rain possible")
-        if humidity and humidity > 80: parts.append("humid")
-        if wind and wind > 30: parts.append("windy")
-        if cloud and cloud > 80: parts.append("overcast")
-        elif cloud and cloud < 20: parts.append("clear skies")
+        if temp:
+            parts.append(f"{temp:.0f}°C")
+        if precip and precip > 50:
+            parts.append("RAIN LIKELY")
+        elif precip and precip > 20:
+            parts.append("rain possible")
+        if humidity and humidity > 80:
+            parts.append("humid")
+        if wind and wind > 30:
+            parts.append("windy")
+        if cloud and cloud > 80:
+            parts.append("overcast")
+        elif cloud and cloud < 20:
+            parts.append("clear skies")
         return ", ".join(parts) if parts else "conditions unknown"
 
 
@@ -251,54 +260,55 @@ class OpenMeteoAPI:
 # https://the-odds-api.com/
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class OddsAPI:
     """Real-time betting odds from 40+ bookmakers."""
 
     BASE = "https://api.the-odds-api.com/v4"
 
-    SPORT_KEYS = {
-        "cricket":    "cricket",
-        "football":   "soccer",
-        "soccer":     "soccer",
-        "tennis":     "tennis",
+    SPORT_KEYS = {  # noqa: RUF012
+        "cricket": "cricket",
+        "football": "soccer",
+        "soccer": "soccer",
+        "tennis": "tennis",
         "basketball": "basketball_nba",
-        "nba":        "basketball_nba",
-        "wnba":       "basketball_wnba",
-        "nfl":        "americanfootball_nfl",
-        "ncaaf":      "americanfootball_ncaaf",
-        "mlb":        "baseball_mlb",
-        "nhl":        "icehockey_nhl",
-        "mma":        "mma_mixed_martial_arts",
-        "ufc":        "mma_mixed_martial_arts",
-        "golf":       "golf",
-        "rugby":      "rugbyleague_nrl",
-        "rugby_union":"rugbyunion",
-        "afl":        "aussierules_afl",
-        "lacrosse":   "lacrosse",
-        "mls":        "soccer_usa_mls",
-        "f1":         "motorsport",
-        "epl":        "soccer_epl",
-        "la_liga":    "soccer_spain_la_liga",
-        "serie_a":    "soccer_italy_serie_a",
+        "nba": "basketball_nba",
+        "wnba": "basketball_wnba",
+        "nfl": "americanfootball_nfl",
+        "ncaaf": "americanfootball_ncaaf",
+        "mlb": "baseball_mlb",
+        "nhl": "icehockey_nhl",
+        "mma": "mma_mixed_martial_arts",
+        "ufc": "mma_mixed_martial_arts",
+        "golf": "golf",
+        "rugby": "rugbyleague_nrl",
+        "rugby_union": "rugbyunion",
+        "afl": "aussierules_afl",
+        "lacrosse": "lacrosse",
+        "mls": "soccer_usa_mls",
+        "f1": "motorsport",
+        "epl": "soccer_epl",
+        "la_liga": "soccer_spain_la_liga",
+        "serie_a": "soccer_italy_serie_a",
         "bundesliga": "soccer_germany_bundesliga",
-        "ligue_1":    "soccer_france_ligue_one",
-        "ucl":        "soccer_uefa_champs_league",
-        "ipl":        "cricket_ipl",
-        "bbl":        "cricket_big_bash",
-        "psl":        "cricket_psl",
-        "t20_wc":     "cricket_icc_world_t20",
+        "ligue_1": "soccer_france_ligue_one",
+        "ucl": "soccer_uefa_champs_league",
+        "ipl": "cricket_ipl",
+        "bbl": "cricket_big_bash",
+        "psl": "cricket_psl",
+        "t20_wc": "cricket_icc_world_t20",
     }
 
     @classmethod
-    def get_odds(cls, sport: str = "cricket", regions: str = "us,uk,eu",
-                 markets: str = "h2h", team_a: str = "", team_b: str = "") -> Optional[list]:
+    def get_odds(
+        cls, sport: str = "cricket", regions: str = "us,uk,eu", markets: str = "h2h", team_a: str = "", team_b: str = ""
+    ) -> list | None:
         """
         Fetch live odds for upcoming matches.
         Returns list of matches with bookmaker odds.
         """
         if not ODDS_API_KEY:
-            logger.info("ODDS_API_KEY not set — returning None. "
-                        "Get free key at https://the-odds-api.com/")
+            logger.info("ODDS_API_KEY not set — returning None. Get free key at https://the-odds-api.com/")
             return None
 
         sport_key = cls.SPORT_KEYS.get(sport.lower(), sport)
@@ -320,8 +330,9 @@ class OddsAPI:
             ta, tb = team_a.lower(), team_b.lower()
             filtered = []
             for match in data:
-                teams = [t.lower() for t in match.get("home_team", "").split()] + \
-                        [t.lower() for t in match.get("away_team", "").split()]
+                teams = [t.lower() for t in match.get("home_team", "").split()] + [
+                    t.lower() for t in match.get("away_team", "").split()
+                ]
                 if any(ta in t for t in teams) or any(tb in t for t in teams):
                     filtered.append(match)
             return filtered if filtered else data
@@ -329,8 +340,7 @@ class OddsAPI:
         return data
 
     @classmethod
-    def get_implied_probabilities(cls, sport: str = "cricket",
-                                  team_a: str = "", team_b: str = "") -> Optional[dict]:
+    def get_implied_probabilities(cls, sport: str = "cricket", team_a: str = "", team_b: str = "") -> dict | None:
         """
         Get market-implied win probabilities.
         Returns {team_a_prob, team_b_prob, draw_prob, best_odds_a, best_odds_b, bookmakers}
@@ -375,8 +385,8 @@ class OddsAPI:
                 "team_a_prob": round(raw_a / total, 4),
                 "team_b_prob": round(raw_b / total, 4),
                 "draw_prob": round(raw_d / total, 4) if raw_d else 0,
-                "best_odds_a": round(max(1/p for p in all_odds_a) if all_odds_a else 0, 2),
-                "best_odds_b": round(max(1/p for p in all_odds_b) if all_odds_b else 0, 2),
+                "best_odds_a": round(max(1 / p for p in all_odds_a) if all_odds_a else 0, 2),
+                "best_odds_b": round(max(1 / p for p in all_odds_b) if all_odds_b else 0, 2),
                 "bookmaker_count": bookmaker_count,
                 "overround": round(total - 1, 4),
             }
@@ -388,65 +398,60 @@ class OddsAPI:
 # https://www.thesportsdb.com/
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TheSportsDB:
     """Free multi-sport API for teams, players, events, venues."""
 
-    BASE = f"https://www.thesportsdb.com/api/v1/json/3"
+    BASE = "https://www.thesportsdb.com/api/v1/json/3"
 
     @classmethod
-    def search_team(cls, team_name: str) -> Optional[dict]:
+    def search_team(cls, team_name: str) -> dict | None:
         url = f"{cls.BASE}/searchteams.php"
-        data = _cached_get(url, f"sdb_team_{team_name}", ttl_hours=168,
-                           params={"t": team_name})
+        data = _cached_get(url, f"sdb_team_{team_name}", ttl_hours=168, params={"t": team_name})
         if data and data.get("teams"):
             return data["teams"][0]
         return None
 
     @classmethod
-    def get_team_details(cls, team_id: str) -> Optional[dict]:
+    def get_team_details(cls, team_id: str) -> dict | None:
         url = f"{cls.BASE}/lookupteam.php"
-        data = _cached_get(url, f"sdb_teamid_{team_id}", ttl_hours=168,
-                           params={"id": team_id})
+        data = _cached_get(url, f"sdb_teamid_{team_id}", ttl_hours=168, params={"id": team_id})
         if data and data.get("teams"):
             return data["teams"][0]
         return None
 
     @classmethod
-    def get_last_events(cls, team_id: str, n: int = 15) -> Optional[list]:
+    def get_last_events(cls, team_id: str, n: int = 15) -> list | None:
         """Get last N events/matches for a team."""
         url = f"{cls.BASE}/eventslast.php"
-        data = _cached_get(url, f"sdb_last_{team_id}", ttl_hours=6,
-                           params={"id": team_id})
+        data = _cached_get(url, f"sdb_last_{team_id}", ttl_hours=6, params={"id": team_id})
         if data and data.get("results"):
             return data["results"][:n]
         return None
 
     @classmethod
-    def get_next_events(cls, team_id: str, n: int = 10) -> Optional[list]:
+    def get_next_events(cls, team_id: str, n: int = 10) -> list | None:
         """Get next N upcoming events."""
         url = f"{cls.BASE}/eventsnext.php"
-        data = _cached_get(url, f"sdb_next_{team_id}", ttl_hours=3,
-                           params={"id": team_id})
+        data = _cached_get(url, f"sdb_next_{team_id}", ttl_hours=3, params={"id": team_id})
         if data and data.get("events"):
             return data["events"][:n]
         return None
 
     @classmethod
-    def get_league_table(cls, league_id: str, season: str = "2025-2026") -> Optional[list]:
+    def get_league_table(cls, league_id: str, season: str = "2025-2026") -> list | None:
         """Get current league standings."""
         url = f"{cls.BASE}/lookuptable.php"
-        data = _cached_get(url, f"sdb_table_{league_id}_{season}", ttl_hours=6,
-                           params={"l": league_id, "s": season})
+        data = _cached_get(url, f"sdb_table_{league_id}_{season}", ttl_hours=6, params={"l": league_id, "s": season})
         if data and data.get("table"):
             return data["table"]
         return None
 
     @classmethod
-    def get_event_stats(cls, event_id: str) -> Optional[dict]:
+    def get_event_stats(cls, event_id: str) -> dict | None:
         """Get detailed stats for a specific event."""
         url = f"{cls.BASE}/lookupeventstats.php"
-        data = _cached_get(url, f"sdb_stats_{event_id}", ttl_hours=24,
-                           params={"id": event_id})
+        data = _cached_get(url, f"sdb_stats_{event_id}", ttl_hours=24, params={"id": event_id})
         return data
 
 
@@ -454,41 +459,42 @@ class TheSportsDB:
 # API 4: ESPN Hidden API — Live scores & match data (FREE, undocumented)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class ESPNAPI:
     """ESPN's undocumented but publicly accessible API for live scores."""
 
     BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
-    SPORT_PATHS = {
-        "cricket":     "cricket",
-        "football":    "soccer",
-        "soccer":      "soccer",
-        "basketball":  "basketball/nba",
-        "nba":         "basketball/nba",
-        "wnba":        "basketball/wnba",
-        "ncaam":       "basketball/mens-college-basketball",
-        "ncaaw":       "basketball/womens-college-basketball",
-        "nfl":         "football/nfl",
-        "ncaaf":       "football/college-football",
-        "mlb":         "baseball/mlb",
-        "nhl":         "hockey/nhl",
-        "mls":         "soccer/usa.1",
-        "tennis":      "tennis",
-        "atp":         "tennis/atp",
-        "wta":         "tennis/wta",
-        "golf":        "golf",
-        "mma":         "mma/ufc",
-        "ufc":         "mma/ufc",
-        "rugby":       "rugby",
-        "rugby_league":"rugby-league",
-        "afl":         "australian-football",
-        "field_hockey":"field-hockey",
-        "lacrosse":    "lacrosse",
-        "f1":          "racing/f1",
+    SPORT_PATHS = {  # noqa: RUF012
+        "cricket": "cricket",
+        "football": "soccer",
+        "soccer": "soccer",
+        "basketball": "basketball/nba",
+        "nba": "basketball/nba",
+        "wnba": "basketball/wnba",
+        "ncaam": "basketball/mens-college-basketball",
+        "ncaaw": "basketball/womens-college-basketball",
+        "nfl": "football/nfl",
+        "ncaaf": "football/college-football",
+        "mlb": "baseball/mlb",
+        "nhl": "hockey/nhl",
+        "mls": "soccer/usa.1",
+        "tennis": "tennis",
+        "atp": "tennis/atp",
+        "wta": "tennis/wta",
+        "golf": "golf",
+        "mma": "mma/ufc",
+        "ufc": "mma/ufc",
+        "rugby": "rugby",
+        "rugby_league": "rugby-league",
+        "afl": "australian-football",
+        "field_hockey": "field-hockey",
+        "lacrosse": "lacrosse",
+        "f1": "racing/f1",
     }
 
     @classmethod
-    def get_scoreboard(cls, sport: str = "cricket", league: str = "") -> Optional[dict]:
+    def get_scoreboard(cls, sport: str = "cricket", league: str = "") -> dict | None:
         """Get live/recent scoreboard."""
         path = cls.SPORT_PATHS.get(sport.lower(), sport)
         url = f"{cls.BASE}/{path}/scoreboard"
@@ -498,14 +504,14 @@ class ESPNAPI:
         return _cached_get(url, f"espn_{sport}_{league}_scores", ttl_hours=0.5, params=params)
 
     @classmethod
-    def get_team_info(cls, sport: str, team_id: str) -> Optional[dict]:
+    def get_team_info(cls, sport: str, team_id: str) -> dict | None:
         """Get team details from ESPN."""
         path = cls.SPORT_PATHS.get(sport.lower(), sport)
         url = f"{cls.BASE}/{path}/teams/{team_id}"
         return _cached_get(url, f"espn_{sport}_team_{team_id}", ttl_hours=24)
 
     @classmethod
-    def get_standings(cls, sport: str = "soccer", league: str = "eng.1") -> Optional[dict]:
+    def get_standings(cls, sport: str = "soccer", league: str = "eng.1") -> dict | None:
         """Get league standings."""
         path = cls.SPORT_PATHS.get(sport.lower(), sport)
         url = f"{cls.BASE}/{path}/standings"
@@ -518,22 +524,23 @@ class ESPNAPI:
 # https://cricsheet.org/
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class CricSheetAPI:
     """Download and parse CricSheet ball-by-ball CSV data."""
 
     BASE = "https://cricsheet.org/downloads"
 
-    DATASETS = {
-        "t20i_male":    "t20s_male_csv2.zip",
-        "odi_male":     "odis_male_csv2.zip",
-        "test_male":    "tests_male_csv2.zip",
-        "ipl":          "ipl_male_csv2.zip",
-        "t20_wc":       "t20s_male_csv2.zip",  # filter by competition
-        "bbl":          "bbl_male_csv2.zip",
-        "cpl":          "cpl_male_csv2.zip",
-        "psl":          "psl_male_csv2.zip",
-        "t20i_female":  "t20s_female_csv2.zip",
-        "odi_female":   "odis_female_csv2.zip",
+    DATASETS = {  # noqa: RUF012
+        "t20i_male": "t20s_male_csv2.zip",
+        "odi_male": "odis_male_csv2.zip",
+        "test_male": "tests_male_csv2.zip",
+        "ipl": "ipl_male_csv2.zip",
+        "t20_wc": "t20s_male_csv2.zip",  # filter by competition
+        "bbl": "bbl_male_csv2.zip",
+        "cpl": "cpl_male_csv2.zip",
+        "psl": "psl_male_csv2.zip",
+        "t20i_female": "t20s_female_csv2.zip",
+        "odi_female": "odis_female_csv2.zip",
     }
 
     @classmethod
@@ -542,7 +549,7 @@ class CricSheetAPI:
         return f"{cls.BASE}/{filename}"
 
     @classmethod
-    def get_recent_matches_index(cls) -> Optional[str]:
+    def get_recent_matches_index(cls) -> str | None:
         """Get the recently added matches index."""
         url = "https://cricsheet.org/matches/"
         return _raw_get(url)
@@ -555,14 +562,30 @@ class CricSheetAPI:
             "url": cls.get_download_url(dataset),
             "format": "CSV (Ashwin format)",
             "fields": [
-                "match_id", "season", "start_date", "venue", "innings",
-                "ball", "batting_team", "bowling_team", "striker", "non_striker",
-                "bowler", "runs_off_bat", "extras", "wides", "noballs",
-                "byes", "legbyes", "penalty", "wicket_type", "player_dismissed"
+                "match_id",
+                "season",
+                "start_date",
+                "venue",
+                "innings",
+                "ball",
+                "batting_team",
+                "bowling_team",
+                "striker",
+                "non_striker",
+                "bowler",
+                "runs_off_bat",
+                "extras",
+                "wides",
+                "noballs",
+                "byes",
+                "legbyes",
+                "penalty",
+                "wicket_type",
+                "player_dismissed",
             ],
             "usage": "Download ZIP, extract, parse CSVs for ball-by-ball analysis",
             "note": "Best source for detailed cricket analytics — batting SR, "
-                    "bowling economy, partnerships, phase-wise scoring, etc."
+            "bowling economy, partnerships, phase-wise scoring, etc.",
         }
 
 
@@ -571,18 +594,25 @@ class CricSheetAPI:
 # https://www.football-data.org/
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class FootballDataAPI:
     """European football leagues, standings, fixtures, results."""
 
     BASE = "https://api.football-data.org/v4"
 
-    COMPETITIONS = {
-        "epl": "PL", "premier_league": "PL",
-        "la_liga": "PD", "bundesliga": "BL1",
-        "serie_a": "SA", "ligue_1": "FL1",
-        "ucl": "CL", "champions_league": "CL",
-        "world_cup": "WC", "euro": "EC",
-        "championship": "ELC", "eredivisie": "DED",
+    COMPETITIONS = {  # noqa: RUF012
+        "epl": "PL",
+        "premier_league": "PL",
+        "la_liga": "PD",
+        "bundesliga": "BL1",
+        "serie_a": "SA",
+        "ligue_1": "FL1",
+        "ucl": "CL",
+        "champions_league": "CL",
+        "world_cup": "WC",
+        "euro": "EC",
+        "championship": "ELC",
+        "eredivisie": "DED",
     }
 
     @classmethod
@@ -593,46 +623,41 @@ class FootballDataAPI:
         return h
 
     @classmethod
-    def get_standings(cls, competition: str = "epl") -> Optional[dict]:
+    def get_standings(cls, competition: str = "epl") -> dict | None:
         code = cls.COMPETITIONS.get(competition.lower(), competition.upper())
         url = f"{cls.BASE}/competitions/{code}/standings"
-        return _cached_get(url, f"fd_standings_{code}", ttl_hours=6,
-                           headers=cls._headers())
+        return _cached_get(url, f"fd_standings_{code}", ttl_hours=6, headers=cls._headers())
 
     @classmethod
-    def get_matches(cls, competition: str = "epl",
-                    status: str = "SCHEDULED") -> Optional[dict]:
+    def get_matches(cls, competition: str = "epl", status: str = "SCHEDULED") -> dict | None:
         """Get matches. status: SCHEDULED, LIVE, FINISHED"""
         code = cls.COMPETITIONS.get(competition.lower(), competition.upper())
         url = f"{cls.BASE}/competitions/{code}/matches"
         params = {"status": status}
-        return _cached_get(url, f"fd_matches_{code}_{status}", ttl_hours=3,
-                           headers=cls._headers(), params=params)
+        return _cached_get(url, f"fd_matches_{code}_{status}", ttl_hours=3, headers=cls._headers(), params=params)
 
     @classmethod
-    def get_team(cls, team_id: int) -> Optional[dict]:
+    def get_team(cls, team_id: int) -> dict | None:
         url = f"{cls.BASE}/teams/{team_id}"
-        return _cached_get(url, f"fd_team_{team_id}", ttl_hours=168,
-                           headers=cls._headers())
+        return _cached_get(url, f"fd_team_{team_id}", ttl_hours=168, headers=cls._headers())
 
     @classmethod
-    def get_head_to_head(cls, match_id: int) -> Optional[dict]:
+    def get_head_to_head(cls, match_id: int) -> dict | None:
         """Get H2H record for a specific fixture."""
         url = f"{cls.BASE}/matches/{match_id}/head2head"
-        return _cached_get(url, f"fd_h2h_{match_id}", ttl_hours=24,
-                           headers=cls._headers())
+        return _cached_get(url, f"fd_h2h_{match_id}", ttl_hours=24, headers=cls._headers())
 
     @classmethod
-    def get_top_scorers(cls, competition: str = "epl") -> Optional[dict]:
+    def get_top_scorers(cls, competition: str = "epl") -> dict | None:
         code = cls.COMPETITIONS.get(competition.lower(), competition.upper())
         url = f"{cls.BASE}/competitions/{code}/scorers"
-        return _cached_get(url, f"fd_scorers_{code}", ttl_hours=12,
-                           headers=cls._headers())
+        return _cached_get(url, f"fd_scorers_{code}", ttl_hours=12, headers=cls._headers())
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # API 7: NBA_API / BallDontLie — Basketball stats (FREE)
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class BasketballAPI:
     """NBA statistics from balldontlie.io (free, 30 req/min)."""
@@ -640,18 +665,18 @@ class BasketballAPI:
     BASE = "https://api.balldontlie.io/v1"
 
     @classmethod
-    def get_teams(cls) -> Optional[list]:
+    def get_teams(cls) -> list | None:
         data = _cached_get(f"{cls.BASE}/teams", "bdl_teams", ttl_hours=168)
         return data.get("data") if data else None
 
     @classmethod
-    def get_player_stats(cls, player_id: int, season: int = 2025) -> Optional[dict]:
+    def get_player_stats(cls, player_id: int, season: int = 2025) -> dict | None:
         url = f"{cls.BASE}/season_averages"
         params = {"season": season, "player_ids[]": player_id}
         return _cached_get(url, f"bdl_stats_{player_id}_{season}", ttl_hours=24, params=params)
 
     @classmethod
-    def get_games(cls, date: str = None, team_ids: list = None) -> Optional[list]:
+    def get_games(cls, date: str | None = None, team_ids: list | None = None) -> list | None:
         """Get games. date format: YYYY-MM-DD"""
         params = {}
         if date:
@@ -667,10 +692,11 @@ class NbaApiWrapper:
     """Wrapper around nba_api Python package for detailed NBA stats."""
 
     @staticmethod
-    def get_team_stats(season: str = "2025-26") -> Optional[list]:
+    def get_team_stats(season: str = "2025-26") -> list | None:
         """Get all team stats for a season."""
         try:
             from nba_api.stats.endpoints import leaguedashteamstats
+
             stats = leaguedashteamstats.LeagueDashTeamStats(season=season)
             df = stats.get_data_frames()[0]
             return df.to_dict("records")
@@ -679,11 +705,11 @@ class NbaApiWrapper:
             return None
 
     @staticmethod
-    def get_player_dashboard(player_id: str) -> Optional[dict]:
+    def get_player_dashboard(player_id: str) -> dict | None:
         try:
             from nba_api.stats.endpoints import playerdashboardbyyearoveryear
-            dashboard = playerdashboardbyyearoveryear.PlayerDashboardByYearOverYear(
-                player_id=player_id)
+
+            dashboard = playerdashboardbyyearoveryear.PlayerDashboardByYearOverYear(player_id=player_id)
             return dashboard.get_data_frames()[0].to_dict("records")
         except Exception as e:
             logger.warning(f"nba_api player failed: {e}")
@@ -695,35 +721,34 @@ class NbaApiWrapper:
 # https://ergast.com/mrd/
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class ErgastF1API:
     """Formula 1 race data, standings, results."""
 
     BASE = "https://ergast.com/api/f1"
 
     @classmethod
-    def get_driver_standings(cls, season: str = "current") -> Optional[dict]:
+    def get_driver_standings(cls, season: str = "current") -> dict | None:
         url = f"{cls.BASE}/{season}/driverStandings.json"
         return _cached_get(url, f"f1_drivers_{season}", ttl_hours=12)
 
     @classmethod
-    def get_constructor_standings(cls, season: str = "current") -> Optional[dict]:
+    def get_constructor_standings(cls, season: str = "current") -> dict | None:
         url = f"{cls.BASE}/{season}/constructorStandings.json"
         return _cached_get(url, f"f1_constructors_{season}", ttl_hours=12)
 
     @classmethod
-    def get_race_results(cls, season: str = "current",
-                         round_num: str = "last") -> Optional[dict]:
+    def get_race_results(cls, season: str = "current", round_num: str = "last") -> dict | None:
         url = f"{cls.BASE}/{season}/{round_num}/results.json"
         return _cached_get(url, f"f1_results_{season}_{round_num}", ttl_hours=24)
 
     @classmethod
-    def get_qualifying(cls, season: str = "current",
-                       round_num: str = "last") -> Optional[dict]:
+    def get_qualifying(cls, season: str = "current", round_num: str = "last") -> dict | None:
         url = f"{cls.BASE}/{season}/{round_num}/qualifying.json"
         return _cached_get(url, f"f1_quali_{season}_{round_num}", ttl_hours=24)
 
     @classmethod
-    def get_schedule(cls, season: str = "current") -> Optional[dict]:
+    def get_schedule(cls, season: str = "current") -> dict | None:
         url = f"{cls.BASE}/{season}.json"
         return _cached_get(url, f"f1_schedule_{season}", ttl_hours=168)
 
@@ -732,21 +757,20 @@ class ErgastF1API:
 # API 9: ICC RANKINGS — Cricket team/player rankings (FREE)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class ICCRankingsAPI:
     """ICC Cricket Rankings scraped from reliable sources."""
 
     @classmethod
-    def get_team_rankings(cls, format: str = "t20i") -> Optional[list]:
+    def get_team_rankings(cls, format: str = "t20i") -> list | None:
         """Get ICC team rankings. format: t20i, odi, test"""
-        url = f"https://www.espncricinfo.com/rankings/content/page/211271.html"
         # Use ESPN API for rankings
         espn_url = "https://site.api.espn.com/apis/site/v2/sports/cricket/rankings"
         data = _cached_get(espn_url, f"icc_rankings_{format}", ttl_hours=24)
         return data
 
     @classmethod
-    def get_player_rankings(cls, format: str = "t20i",
-                            type: str = "batting") -> Optional[list]:
+    def get_player_rankings(cls, format: str = "t20i", type: str = "batting") -> list | None:
         """Get ICC player rankings. type: batting, bowling, allrounder"""
         espn_url = "https://site.api.espn.com/apis/site/v2/sports/cricket/rankings"
         data = _cached_get(espn_url, f"icc_player_{format}_{type}", ttl_hours=24)
@@ -757,12 +781,12 @@ class ICCRankingsAPI:
 # API 10: NEWS / INJURY FEEDS
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class NewsInjuryAPI:
     """Sports news and injury updates."""
 
     @classmethod
-    def get_sports_news(cls, query: str = "cricket injury",
-                        language: str = "en") -> Optional[list]:
+    def get_sports_news(cls, query: str = "cricket injury", language: str = "en") -> list | None:
         """Get recent sports news. Uses NewsData.io free tier."""
         if not NEWSDATA_KEY:
             logger.info("NEWSDATA_KEY not set. Get free key at https://newsdata.io/")
@@ -777,17 +801,20 @@ class NewsInjuryAPI:
         }
         data = _cached_get(url, f"news_{query.replace(' ', '_')}", ttl_hours=3, params=params)
         if data and data.get("results"):
-            return [{
-                "title": r.get("title"),
-                "description": r.get("description"),
-                "source": r.get("source_id"),
-                "published": r.get("pubDate"),
-                "link": r.get("link"),
-            } for r in data["results"][:10]]
+            return [
+                {
+                    "title": r.get("title"),
+                    "description": r.get("description"),
+                    "source": r.get("source_id"),
+                    "published": r.get("pubDate"),
+                    "link": r.get("link"),
+                }
+                for r in data["results"][:10]
+            ]
         return None
 
     @classmethod
-    def search_injury(cls, team: str, sport: str = "cricket") -> Optional[list]:
+    def search_injury(cls, team: str, sport: str = "cricket") -> list | None:
         """Search for injury news about a specific team."""
         return cls.get_sports_news(f"{team} {sport} injury squad update")
 
@@ -796,21 +823,23 @@ class NewsInjuryAPI:
 # API 11: GEOCODING — Venue location (FREE, Nominatim/OSM)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class GeocodingAPI:
     """Geocode venue names to coordinates using OpenStreetMap Nominatim."""
 
     BASE = "https://nominatim.openstreetmap.org/search"
 
     @classmethod
-    def geocode(cls, venue_name: str) -> Optional[dict]:
+    def geocode(cls, venue_name: str) -> dict | None:
         params = {
             "q": venue_name,
             "format": "json",
             "limit": 1,
         }
         headers = {"User-Agent": "OracleSportsPredictor/1.0"}
-        data = _cached_get(cls.BASE, f"geo_{venue_name.replace(' ', '_')}",
-                           ttl_hours=720, headers=headers, params=params)
+        data = _cached_get(
+            cls.BASE, f"geo_{venue_name.replace(' ', '_')}", ttl_hours=720, headers=headers, params=params
+        )
         if data and isinstance(data, list) and len(data) > 0:
             return {
                 "lat": float(data[0]["lat"]),
@@ -824,10 +853,11 @@ class GeocodingAPI:
 # API 12: HISTORICAL DATASETS — GitHub raw data (FREE)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class HistoricalDataAPI:
     """Access curated historical sports datasets from GitHub."""
 
-    DATASETS = {
+    DATASETS = {  # noqa: RUF012
         "football_results": {
             "url": "https://raw.githubusercontent.com/martj42/international_results/master/results.csv",
             "desc": "48,000+ international football results since 1872",
@@ -856,7 +886,7 @@ class HistoricalDataAPI:
     }
 
     @classmethod
-    def download_dataset(cls, key: str) -> Optional[str]:
+    def download_dataset(cls, key: str) -> str | None:
         """Download a dataset and return as text (for CSVs)."""
         dataset = cls.DATASETS.get(key)
         if not dataset:
@@ -870,21 +900,23 @@ class HistoricalDataAPI:
         return _raw_get(url)
 
     @classmethod
-    def get_football_results(cls, limit: int = 5000) -> Optional[pd.DataFrame]:
+    def get_football_results(cls, limit: int = 5000) -> pd.DataFrame | None:
         """Load international football results."""
         text = cls.download_dataset("football_results")
         if text:
             import pandas as pd
+
             df = pd.read_csv(io.StringIO(text))
             return df.tail(limit)
         return None
 
     @classmethod
-    def get_epl_with_odds(cls) -> Optional[pd.DataFrame]:
+    def get_epl_with_odds(cls) -> pd.DataFrame | None:
         """Load EPL results WITH bookmaker odds (football-data.co.uk)."""
         text = cls.download_dataset("football_epl")
         if text:
             import pandas as pd
+
             df = pd.read_csv(io.StringIO(text))
             return df
         return None
@@ -898,13 +930,14 @@ class HistoricalDataAPI:
 # API 13: RATING SYSTEMS — Glicko-2 & TrueSkill (local computation)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class RatingSystems:
     """Advanced rating systems beyond basic Elo."""
 
     @staticmethod
-    def glicko2_update(rating: float, rd: float, vol: float,
-                       opponent_rating: float, opponent_rd: float,
-                       result: float) -> tuple[float, float, float]:
+    def glicko2_update(
+        rating: float, rd: float, vol: float, opponent_rating: float, opponent_rd: float, result: float
+    ) -> tuple[float, float, float]:
         """
         Glicko-2 rating update. Better than Elo because it models:
         - Rating deviation (uncertainty)
@@ -914,6 +947,7 @@ class RatingSystems:
         """
         try:
             import glicko2
+
             player = glicko2.Player(rating=rating, rd=rd, vol=vol)
             player.update_player([opponent_rating], [opponent_rd], [result])
             return player.getRating(), player.getRd(), player.vol
@@ -925,9 +959,7 @@ class RatingSystems:
             return new_rating, rd, vol
 
     @staticmethod
-    def trueskill_update(mu_a: float, sigma_a: float,
-                         mu_b: float, sigma_b: float,
-                         winner: str = "a") -> dict:
+    def trueskill_update(mu_a: float, sigma_a: float, mu_b: float, sigma_b: float, winner: str = "a") -> dict:
         """
         TrueSkill rating update. Best for:
         - Individual sports (tennis, golf)
@@ -937,7 +969,8 @@ class RatingSystems:
         """
         try:
             import trueskill
-            env = trueskill.TrueSkill()
+
+            trueskill.TrueSkill()
             p1 = trueskill.Rating(mu=mu_a, sigma=sigma_a)
             p2 = trueskill.Rating(mu=mu_b, sigma=sigma_b)
 
@@ -953,13 +986,12 @@ class RatingSystems:
                 "b": {"mu": new_p2.mu, "sigma": new_p2.sigma},
             }
         except ImportError:
-            return {"a": {"mu": mu_a, "sigma": sigma_a},
-                    "b": {"mu": mu_b, "sigma": sigma_b}}
+            return {"a": {"mu": mu_a, "sigma": sigma_a}, "b": {"mu": mu_b, "sigma": sigma_b}}
 
     @staticmethod
-    def margin_of_victory_elo(elo_a: float, elo_b: float,
-                              score_a: float, score_b: float,
-                              K: float = 32) -> tuple[float, float]:
+    def margin_of_victory_elo(
+        elo_a: float, elo_b: float, score_a: float, score_b: float, K: float = 32
+    ) -> tuple[float, float]:
         """
         Margin-of-Victory adjusted Elo.
         A 100-run win updates more than a 1-run win.
@@ -980,6 +1012,7 @@ class RatingSystems:
 # MASTER AGGREGATOR — Combines all APIs for a single match
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class OracleDataAggregator:
     """
     Pulls data from ALL available APIs for a single match prediction.
@@ -987,8 +1020,7 @@ class OracleDataAggregator:
     """
 
     @classmethod
-    def gather_match_data(cls, sport: str, team_a: str, team_b: str,
-                          venue: str, date: str = None) -> dict:
+    def gather_match_data(cls, sport: str, team_a: str, team_b: str, venue: str, date: str | None = None) -> dict:
         """
         Gather every available piece of data for a match.
         Returns a comprehensive dict ready for feature engineering.
@@ -1031,12 +1063,15 @@ class OracleDataAggregator:
             if team_a_info.get("idTeam"):
                 last = TheSportsDB.get_last_events(team_a_info["idTeam"])
                 if last:
-                    result["team_a_recent"] = [{
-                        "event": e.get("strEvent"),
-                        "date": e.get("dateEvent"),
-                        "home_score": e.get("intHomeScore"),
-                        "away_score": e.get("intAwayScore"),
-                    } for e in last[:5]]
+                    result["team_a_recent"] = [
+                        {
+                            "event": e.get("strEvent"),
+                            "date": e.get("dateEvent"),
+                            "home_score": e.get("intHomeScore"),
+                            "away_score": e.get("intAwayScore"),
+                        }
+                        for e in last[:5]
+                    ]
 
         if team_b_info:
             result["team_b_meta"] = {
@@ -1049,12 +1084,15 @@ class OracleDataAggregator:
             if team_b_info.get("idTeam"):
                 last = TheSportsDB.get_last_events(team_b_info["idTeam"])
                 if last:
-                    result["team_b_recent"] = [{
-                        "event": e.get("strEvent"),
-                        "date": e.get("dateEvent"),
-                        "home_score": e.get("intHomeScore"),
-                        "away_score": e.get("intAwayScore"),
-                    } for e in last[:5]]
+                    result["team_b_recent"] = [
+                        {
+                            "event": e.get("strEvent"),
+                            "date": e.get("dateEvent"),
+                            "home_score": e.get("intHomeScore"),
+                            "away_score": e.get("intAwayScore"),
+                        }
+                        for e in last[:5]
+                    ]
 
         # 4. ESPN live data
         espn = ESPNAPI.get_scoreboard(sport)
@@ -1115,7 +1153,6 @@ class OracleDataAggregator:
 # DEMO & TEST
 # ═══════════════════════════════════════════════════════════════════════════
 
-import math  # needed for MOV Elo
 
 def main():
     """Test all API integrations."""
@@ -1143,7 +1180,7 @@ def main():
     if ODDS_API_KEY:
         odds = OddsAPI.get_implied_probabilities("cricket", "India", "New Zealand")
         if odds:
-            print(f"    ✅ IND: {odds['team_a_prob']*100:.1f}% | NZ: {odds['team_b_prob']*100:.1f}%")
+            print(f"    ✅ IND: {odds['team_a_prob'] * 100:.1f}% | NZ: {odds['team_b_prob'] * 100:.1f}%")
             apis_working += 1
         else:
             print("    ⚠️ Key set but no data returned")
@@ -1177,7 +1214,7 @@ def main():
     if FOOTBALL_DATA_KEY:
         standings = FootballDataAPI.get_standings("epl")
         if standings:
-            print(f"    ✅ EPL standings loaded")
+            print("    ✅ EPL standings loaded")
             apis_working += 1
         else:
             print("    ⚠️ Key set but no data")
@@ -1231,7 +1268,7 @@ def main():
     print("\n  [9/13] 🏏 ICC Rankings (via ESPN)...")
     rankings = ICCRankingsAPI.get_team_rankings("t20i")
     if rankings:
-        print(f"    ✅ Rankings data received")
+        print("    ✅ Rankings data received")
         apis_working += 1
     else:
         print("    ⚠️ May need different endpoint")
@@ -1270,8 +1307,7 @@ def main():
     # 13. Rating Systems
     print("\n  [13/13] 📈 Advanced Rating Systems...")
     # Test Glicko-2
-    new_r, new_rd, new_vol = RatingSystems.glicko2_update(
-        1500, 200, 0.06, 1400, 30, 1.0)
+    new_r, new_rd, _new_vol = RatingSystems.glicko2_update(1500, 200, 0.06, 1400, 30, 1.0)
     print(f"    ✅ Glicko-2: 1500 beats 1400 → new rating {new_r:.1f} (RD: {new_rd:.1f})")
 
     # Test TrueSkill
@@ -1287,9 +1323,7 @@ def main():
     print("\n" + "=" * 90)
     print("  FULL AGGREGATION TEST: India vs New Zealand, Ahmedabad")
     print("=" * 90)
-    full_data = OracleDataAggregator.gather_match_data(
-        "cricket", "India", "New Zealand", "Ahmedabad", "2026-03-08"
-    )
+    full_data = OracleDataAggregator.gather_match_data("cricket", "India", "New Zealand", "Ahmedabad", "2026-03-08")
     print(f"\n  Data sources hit: {full_data['api_coverage']}")
     print(f"  Sources: {', '.join(full_data['data_sources'])}")
     if "weather" in full_data:
@@ -1298,7 +1332,7 @@ def main():
         print(f"  Dew Risk: {w['dew_risk']}")
     if "betting_odds" in full_data:
         o = full_data["betting_odds"]
-        print(f"  Betting: IND {o['team_a_prob']*100:.1f}% | NZ {o['team_b_prob']*100:.1f}%")
+        print(f"  Betting: IND {o['team_a_prob'] * 100:.1f}% | NZ {o['team_b_prob'] * 100:.1f}%")
 
     # Save full data
     output_path = Path(os.path.dirname(os.path.abspath(__file__))) / "aggregated_match_data.json"
@@ -1307,25 +1341,25 @@ def main():
 
     # ── Summary ──
     print(f"\n{'=' * 90}")
-    print(f"  API INTEGRATION SUMMARY")
+    print("  API INTEGRATION SUMMARY")
     print(f"{'=' * 90}")
     print(f"  APIs working:  {apis_working}/{apis_total}")
-    print(f"  APIs needing keys (all free tier):")
+    print("  APIs needing keys (all free tier):")
     if not ODDS_API_KEY:
-        print(f"    • ODDS_API_KEY    → https://the-odds-api.com/")
+        print("    • ODDS_API_KEY    → https://the-odds-api.com/")
     if not FOOTBALL_DATA_KEY:
-        print(f"    • FOOTBALL_DATA_KEY → https://www.football-data.org/")
+        print("    • FOOTBALL_DATA_KEY → https://www.football-data.org/")
     if not NEWSDATA_KEY:
-        print(f"    • NEWSDATA_KEY    → https://newsdata.io/")
-    print(f"\n  APIs working WITHOUT any key:")
-    print(f"    ✅ Open-Meteo (weather)")
-    print(f"    ✅ TheSportsDB (multi-sport metadata)")
-    print(f"    ✅ CricSheet (ball-by-ball cricket)")
-    print(f"    ✅ ESPN Hidden API (live scores)")
-    print(f"    ✅ Ergast (Formula 1)")
-    print(f"    ✅ Nominatim (geocoding)")
-    print(f"    ✅ GitHub Datasets (historical)")
-    print(f"    ✅ Glicko-2 / TrueSkill / MOV-Elo (local)")
+        print("    • NEWSDATA_KEY    → https://newsdata.io/")
+    print("\n  APIs working WITHOUT any key:")
+    print("    ✅ Open-Meteo (weather)")
+    print("    ✅ TheSportsDB (multi-sport metadata)")
+    print("    ✅ CricSheet (ball-by-ball cricket)")
+    print("    ✅ ESPN Hidden API (live scores)")
+    print("    ✅ Ergast (Formula 1)")
+    print("    ✅ Nominatim (geocoding)")
+    print("    ✅ GitHub Datasets (historical)")
+    print("    ✅ Glicko-2 / TrueSkill / MOV-Elo (local)")
     print(f"{'=' * 90}")
 
 

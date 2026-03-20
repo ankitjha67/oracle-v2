@@ -1,6 +1,6 @@
 """Tests for the prediction engine — features, models, player database."""
+
 import numpy as np
-import pytest
 
 from engine import (
     FEATURE_NAMES,
@@ -109,7 +109,7 @@ class TestBuildModels:
         models = build_models()
         X = np.random.rand(20, 50)
         y = np.array([0, 1] * 10)
-        for name, model in list(models.items())[:3]:  # test first 3 for speed
+        for _name, model in list(models.items())[:3]:  # test first 3 for speed
             model.fit(X, y)
             pred = model.predict(X[:1])
             assert pred[0] in (0, 1)

@@ -2,6 +2,16 @@
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+py-modules = [
+    "core", "engine", "run", "all_apis", "analytics", "api_server",
+    "cricsheet_pipeline", "env_loader", "fixture_fetcher",
+    "football_pipeline", "logging_config", "multi_sport", "sentiment",
+]
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "cricsheet_data*", "football_data*"]
+
 [project]
 name = "oracle-v2"
 version = "3.0.0"
@@ -52,6 +62,11 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.8",
     "pre-commit>=3.0",
+]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
 ]
 
 [project.scripts]

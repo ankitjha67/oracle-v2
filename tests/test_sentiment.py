@@ -1,5 +1,4 @@
 """Tests for the sentiment engine — blending and probability calculations."""
-import pytest
 
 from sentiment import blend_prediction
 

@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[test]"
       - name: Run tests
         run: pytest tests/ -v --tb=short -x
       - name: Run tests with coverage

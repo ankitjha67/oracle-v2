@@ -9,13 +9,17 @@ Model Signal = "What does our Elo/ML engine say?"
 Final Prediction = weighted blend of both.
 """
 
-import json, os, time, math, requests
-from collections import defaultdict
+import json
+import os
+import time
 from pathlib import Path
+
+import requests
 
 CACHE_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 ESPN = "https://site.api.espn.com/apis/site/v2/sports"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # ESPN ODDS EXTRACTION (Free — DraftKings data embedded in scoreboard)
@@ -28,12 +32,13 @@ def extract_espn_odds(sport_espn_path, dates=None):
     """
     if dates is None:
         from datetime import datetime
+
         dates = [datetime.now().strftime("%Y%m%d")]
 
     all_odds = []
     for dt in dates:
         url = f"{ESPN}/{sport_espn_path}/scoreboard?dates={dt}"
-        cf = CACHE_DIR / f"odds_{sport_espn_path.replace('/','_')}_{dt}.json"
+        cf = CACHE_DIR / f"odds_{sport_espn_path.replace('/', '_')}_{dt}.json"
         data = None
         if cf.exists() and (time.time() - cf.stat().st_mtime) / 3600 < 0.5:
             with open(cf) as f:
@@ -61,7 +66,7 @@ def extract_espn_odds(sport_espn_path, dates=None):
             t0, t1 = teams[0], teams[1]
             n0 = t0.get("team", {}).get("displayName", "?")
             n1 = t1.get("team", {}).get("displayName", "?")
-            home = n0 if t0.get("homeAway") == "home" else n1
+            n0 if t0.get("homeAway") == "home" else n1
 
             spread = o.get("spread", 0) or 0
             over_under = o.get("overUnder", 0) or 0
@@ -70,7 +75,7 @@ def extract_espn_odds(sport_espn_path, dates=None):
             hto = o.get("homeTeamOdds", {})
             ato = o.get("awayTeamOdds", {})
             home_fav = hto.get("favorite", False)
-            away_fav = ato.get("favorite", False)
+            ato.get("favorite", False)
             fav_at_open_h = hto.get("favoriteAtOpen", False)
 
             # Convert spread to implied win probability
@@ -94,18 +99,32 @@ def extract_espn_odds(sport_espn_path, dates=None):
             elif not fav_at_open_h and home_fav:
                 line_moved = "HOME_SHIFT"  # Market moved toward home
 
-            all_odds.append({
-                "home": n0 if t0.get("homeAway") == "home" else n1,
-                "away": n1 if t0.get("homeAway") == "home" else n0,
-                "spread": float(spread),
-                "over_under": float(over_under),
-                "home_implied_pct": round(home_implied, 1),
-                "away_implied_pct": round(100 - home_implied, 1),
-                "home_favorite": home_fav,
-                "line_movement": line_moved,
-                "provider": o.get("provider", {}).get("name", "Unknown"),
-                "date": event.get("date", "")[:10],
-            })
+            # Determine line_type from status and timing
+            status = event.get("status", {}).get("type", {}).get("name", "")
+            if "FINAL" in status.upper() or "COMPLETE" in status.upper():
+                line_type = "closing"
+            elif fav_at_open_h is not None and line_moved != "STABLE":
+                line_type = "mid"
+            else:
+                line_type = "opening"
+
+            all_odds.append(
+                {
+                    "home": n0 if t0.get("homeAway") == "home" else n1,
+                    "away": n1 if t0.get("homeAway") == "home" else n0,
+                    "spread": float(spread),
+                    "over_under": float(over_under),
+                    "home_implied_pct": round(home_implied, 1),
+                    "away_implied_pct": round(100 - home_implied, 1),
+                    "home_decimal_odds": round(100 / home_implied, 2) if home_implied > 0 else 0,
+                    "away_decimal_odds": round(100 / (100 - home_implied), 2) if home_implied < 100 else 0,
+                    "home_favorite": home_fav,
+                    "line_movement": line_moved,
+                    "line_type": line_type,
+                    "provider": o.get("provider", {}).get("name", "Unknown"),
+                    "date": event.get("date", "")[:10],
+                }
+            )
     return all_odds
 
 
@@ -118,11 +137,16 @@ def fetch_odds_api(api_key, sport="upcoming", regions="us,uk,eu", markets="h2h,s
         return []
 
     SPORT_MAP = {
-        "EPL": "soccer_epl", "La Liga": "soccer_spain_la_liga",
-        "Serie A": "soccer_italy_serie_a", "Bundesliga": "soccer_germany_bundesliga",
-        "Ligue 1": "soccer_france_ligue_one", "UCL": "soccer_uefa_champions_league",
-        "NBA": "basketball_nba", "NHL": "icehockey_nhl",
-        "MLB": "baseball_mlb", "NFL": "americanfootball_nfl",
+        "EPL": "soccer_epl",
+        "La Liga": "soccer_spain_la_liga",
+        "Serie A": "soccer_italy_serie_a",
+        "Bundesliga": "soccer_germany_bundesliga",
+        "Ligue 1": "soccer_france_ligue_one",
+        "UCL": "soccer_uefa_champions_league",
+        "NBA": "basketball_nba",
+        "NHL": "icehockey_nhl",
+        "MLB": "baseball_mlb",
+        "NFL": "americanfootball_nfl",
         "UFC": "mma_mixed_martial_arts",
     }
 
@@ -130,10 +154,11 @@ def fetch_odds_api(api_key, sport="upcoming", regions="us,uk,eu", markets="h2h,s
     for league, api_sport in SPORT_MAP.items():
         try:
             url = f"https://api.the-odds-api.com/v4/sports/{api_sport}/odds/"
-            r = requests.get(url, params={
-                "apiKey": api_key, "regions": regions, "markets": markets,
-                "oddsFormat": "decimal"
-            }, timeout=15)
+            r = requests.get(
+                url,
+                params={"apiKey": api_key, "regions": regions, "markets": markets, "oddsFormat": "decimal"},
+                timeout=15,
+            )
             if r.status_code != 200:
                 continue
             for game in r.json():
@@ -143,14 +168,18 @@ def fetch_odds_api(api_key, sport="upcoming", regions="us,uk,eu", markets="h2h,s
                     for market in bm.get("markets", []):
                         if market.get("key") == "h2h":
                             outcomes = {o["name"]: o["price"] for o in market.get("outcomes", [])}
-                            all_odds.append({
-                                "home": home, "away": away, "league": league,
-                                "bookmaker": bm.get("title", ""),
-                                "home_odds": outcomes.get(home, 0),
-                                "away_odds": outcomes.get(away, 0),
-                                "draw_odds": outcomes.get("Draw", 0),
-                                "date": game.get("commence_time", "")[:10],
-                            })
+                            all_odds.append(
+                                {
+                                    "home": home,
+                                    "away": away,
+                                    "league": league,
+                                    "bookmaker": bm.get("title", ""),
+                                    "home_odds": outcomes.get(home, 0),
+                                    "away_odds": outcomes.get(away, 0),
+                                    "draw_odds": outcomes.get("Draw", 0),
+                                    "date": game.get("commence_time", "")[:10],
+                                }
+                            )
         except Exception:
             continue
     return all_odds
@@ -181,8 +210,7 @@ def blend_prediction(model_prob_a, sentiment_prob_a, model_weight=0.65, sentimen
     blended = max(5.0, min(95.0, blended))
 
     agreement = abs(model_prob_a - sentiment_prob_a) < 10
-    direction_agree = (model_prob_a > 50 and sentiment_prob_a > 50) or \
-                      (model_prob_a < 50 and sentiment_prob_a < 50)
+    direction_agree = (model_prob_a > 50 and sentiment_prob_a > 50) or (model_prob_a < 50 and sentiment_prob_a < 50)
 
     if direction_agree and agreement:
         confidence = "HIGH"
@@ -192,7 +220,7 @@ def blend_prediction(model_prob_a, sentiment_prob_a, model_weight=0.65, sentimen
         signal = "SAME PICK, DIFFERENT MARGIN"
     else:
         confidence = "CONTRARIAN"
-        signal = f"MODEL says {'HOME' if model_prob_a>50 else 'AWAY'}, MARKET says {'HOME' if sentiment_prob_a>50 else 'AWAY'}"
+        signal = f"MODEL says {'HOME' if model_prob_a > 50 else 'AWAY'}, MARKET says {'HOME' if sentiment_prob_a > 50 else 'AWAY'}"
 
     return {
         "blended_prob_a": round(blended, 1),
@@ -212,6 +240,7 @@ def enrich_predictions_with_sentiment(predictions, sport_espn_path, odds_api_key
     For each prediction, finds matching ESPN odds and blends them.
     """
     from datetime import datetime, timedelta
+
     dates = [(datetime.now() + timedelta(days=d)).strftime("%Y%m%d") for d in range(8)]
     espn_odds = extract_espn_odds(sport_espn_path, dates)
 
@@ -247,8 +276,9 @@ def enrich_predictions_with_sentiment(predictions, sport_espn_path, odds_api_key
 
         if espn:
             # Get model probability
-            model_prob_a = pred.get("prediction", {}).get("prob_a",
-                            pred.get("oracle_prediction", {}).get("home_pct", 50))
+            model_prob_a = pred.get("prediction", {}).get(
+                "prob_a", pred.get("oracle_prediction", {}).get("home_pct", 50)
+            )
 
             # Get sentiment probability from ESPN spread
             if espn["home"] == a:
@@ -262,9 +292,32 @@ def enrich_predictions_with_sentiment(predictions, sport_espn_path, odds_api_key
                 "espn_over_under": espn["over_under"],
                 "espn_provider": espn["provider"],
                 "line_movement": espn["line_movement"],
+                "line_type": espn.get("line_type", "snapshot"),
                 "implied_prob_a": sentiment_prob_a,
+                "home_decimal_odds": espn.get("home_decimal_odds", 0),
+                "away_decimal_odds": espn.get("away_decimal_odds", 0),
                 **blend,
             }
+
+            # Compute EV for this prediction
+            try:
+                from analytics import EVCalculator, KellyStaker
+
+                home_odds = espn.get("home_decimal_odds", 0)
+                away_odds = espn.get("away_decimal_odds", 0)
+                if home_odds > 1:
+                    ev_home = EVCalculator.calculate_ev(model_prob_a / 100, home_odds)
+                    kelly_home = KellyStaker.kelly_fraction(model_prob_a / 100, home_odds)
+                    pred["sentiment"]["ev_home"] = ev_home["ev"]
+                    pred["sentiment"]["kelly_home_pct"] = round(kelly_home * 100, 2)
+                if away_odds > 1:
+                    ev_away = EVCalculator.calculate_ev((100 - model_prob_a) / 100, away_odds)
+                    kelly_away = KellyStaker.kelly_fraction((100 - model_prob_a) / 100, away_odds)
+                    pred["sentiment"]["ev_away"] = ev_away["ev"]
+                    pred["sentiment"]["kelly_away_pct"] = round(kelly_away * 100, 2)
+            except ImportError:
+                pass
+
             enriched += 1
 
         # Add bookmaker consensus if available
@@ -285,11 +338,12 @@ def enrich_predictions_with_sentiment(predictions, sport_espn_path, odds_api_key
 
 if __name__ == "__main__":
     print("=== ESPN Embedded Odds (DraftKings) ===")
-    for sport, path in [("NBA", "basketball/nba"), ("NHL", "hockey/nhl"),
-                         ("EPL", "soccer/eng.1")]:
+    for sport, path in [("NBA", "basketball/nba"), ("NHL", "hockey/nhl"), ("EPL", "soccer/eng.1")]:
         odds = extract_espn_odds(path)
         print(f"\n{sport}: {len(odds)} matches with odds")
         for o in odds[:3]:
-            print(f"  {o['home']:<25} vs {o['away']:<25} "
-                  f"Spread: {o['spread']:>5} | O/U: {o['over_under']:>5} | "
-                  f"Home: {o['home_implied_pct']}% | {o['line_movement']}")
+            print(
+                f"  {o['home']:<25} vs {o['away']:<25} "
+                f"Spread: {o['spread']:>5} | O/U: {o['over_under']:>5} | "
+                f"Home: {o['home_implied_pct']}% | {o['line_movement']}"
+            )
