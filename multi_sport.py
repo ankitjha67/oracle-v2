@@ -426,7 +426,7 @@ def run_all_sports(sport_keys=None, days_back=30, days_ahead=7):
             lb = LOOKBACK.get(sport, days_back)
 
             if sport == "UFC":
-                result = build_ufc(days_back=lb, days_ahead=14)
+                result = build_ufc(days_back=lb, days_ahead=days_ahead)
             elif cfg["type"] == "team":
                 result = build_team_sport(sport, lb, days_ahead)
             else:

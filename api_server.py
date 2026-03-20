@@ -276,13 +276,19 @@ def analytics_evaluation_all():
 @app.get("/analytics/clv/{sport}")
 def analytics_clv(sport: str):
     """Closing Line Value summary for a sport."""
-    return analytics.clv.summary(sport=sport)
+    result = analytics.clv.summary(sport=sport)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @app.get("/analytics/clv")
 def analytics_clv_all():
     """CLV summary across all sports."""
-    return analytics.clv.summary()
+    result = analytics.clv.summary()
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @app.post("/analytics/ev")
@@ -452,6 +458,7 @@ def check_degradation(sport: str | None = None, n: int = 200):
         1 if (r["prob_a"] > 0.5 and r["is_correct"] == 1) or (r["prob_a"] <= 0.5 and r["is_correct"] == 0) else 0
         for r in rows
     ]
+    accuracies.reverse()
     return MarketEfficiencyMonitor.detect_degradation(accuracies)
 
 

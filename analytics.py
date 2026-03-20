@@ -1309,7 +1309,7 @@ class PlayoffCalculator:
         for _ in range(n_sims):
             bracket = list(seeds)  # current round participants
 
-            for _r_idx, rn in enumerate(round_names):
+            for rn in round_names:
                 next_round = []
                 for i in range(0, len(bracket), 2):
                     if i + 1 >= len(bracket):
@@ -1347,6 +1347,10 @@ class PlayoffCalculator:
 
     def _simulate_series(self, team_a: str, team_b: str, best_of: int, rng) -> str:
         """Simulate a single series between two teams."""
+        if team_a.startswith("BYE_"):
+            return team_b
+        if team_b.startswith("BYE_"):
+            return team_a
         if self.predict_fn:
             pred = self.predict_fn(team_a, team_b)
             prob_a = pred.get("prob_a", 0.5)
@@ -1691,7 +1695,7 @@ class PredictionTimeSeries:
             SELECT ts.match_id, ts.prob_a, ts.days_until_match,
                    p.is_correct
             FROM prediction_timeseries ts
-            JOIN predictions p ON ts.match_id = p.id
+            JOIN predictions p ON ts.match_id = p.match_id
             WHERE p.is_correct >= 0
         """
         params: list = []
