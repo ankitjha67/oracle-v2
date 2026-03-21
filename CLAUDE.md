@@ -1,7 +1,7 @@
 # Oracle V2 — Development Guide
 
 ## Project Overview
-Universal Sports Prediction Engine covering 20+ sports across ESPN, CricSheet, and OpenF1 data sources.
+Universal Sports Prediction Engine covering 20+ sports across ESPN, CricSheet, and OpenF1 data sources. Features ML ensembles (up to 12 models), 4 rating systems, advanced analytics, roster tracking, and market sentiment integration.
 
 ## Sports Coverage
 | Category | Sports | Data Source |
@@ -35,25 +35,29 @@ python api_server.py
 
 ## Architecture
 - **run.py** — Entry point and orchestrator
-- **core.py** — Database (SQLite), rating systems (Elo/Glicko-2/TrueSkill), calibration, backtesting
+- **core.py** — Database (SQLite), 4 rating systems (Elo/Glicko-2/TrueSkill/composite), calibration, backtesting, Monte Carlo
 - **engine.py** — Cricket ML engine with 56 features, 12-model ensemble + stacking meta-learner
+- **ml_sports.py** — Universal ML engine for all ESPN sports (35 features, 12 models, roster tracking)
 - **football_pipeline.py** — Football ML with 3-class (W/D/L) prediction + Poisson scoring
 - **multi_sport.py** — 20+ sports via ESPN API + universal Elo with dynamic K-factors
+- **analytics.py** — CLV tracking, EV calculator, Kelly Criterion, season/playoff sims, SHAP, changepoints, market efficiency
 - **sentiment.py** — ESPN DraftKings odds extraction and model-market blending
 - **all_apis.py** — 13 API integrations with caching
 - **cricsheet_pipeline.py** — Ball-by-ball cricket data parser + domestic T20 league support
 - **fixture_fetcher.py** — Live fixture fetching from ESPN
-- **api_server.py** — FastAPI REST API server with OpenAPI docs
+- **api_server.py** — FastAPI REST API server with 25+ endpoints
 - **logging_config.py** — Structured logging configuration
 - **env_loader.py** — Environment variable loader
 
 ## Key Features
-- **56 ML features** including form velocity, volatility, and interaction terms
+- **56 ML features** (cricket) / **35 ML features** (ESPN sports) including form velocity, volatility, and interaction terms
+- **12-model ensembles** — RF, GBM, LR, XGBoost, LightGBM, MLP, AdaBoost, SVM, Bagging, NaiveBayes, VotingClassifier, StackingMeta
 - **Model disagreement confidence** — ensemble std dev penalizes uncertain predictions
-- **Stacking meta-learner** — LogisticRegression trained on base model outputs
+- **RosterTracker** — auto-fetches ESPN rosters, detects changes, computes stability signals
 - **Dynamic K-factor** — stage-dependent Elo updates (group=20, final=40)
 - **Enhanced H2H** — trend detection, streak tracking, momentum signals
 - **BiasAuditor** — systematic bias detection in prediction pipeline
+- **Analytics suite** — CLV, EV, Kelly, season sims, playoff brackets, SHAP, changepoint detection, market efficiency
 - **Domestic cricket leagues** — IPL, BBL, CPL, PSL, SA20, The Hundred via CricSheet
 
 ## Testing
@@ -74,14 +78,25 @@ mypy .         # Type check
 ## REST API
 ```bash
 python api_server.py  # Start on port 8000
-# Endpoints:
-#   GET  /health              — Health check
-#   GET  /sports              — List supported sports
-#   GET  /ratings/{sport}     — Get team ratings
-#   POST /predict/cricket     — Cricket match prediction
-#   GET  /predictions/recent  — Recent predictions
-#   GET  /h2h/{team_a}/{team_b} — Head-to-head analysis
-#   GET  /docs                — Interactive API docs
+# Core Endpoints:
+#   GET  /health                        — Health check
+#   GET  /sports                        — List supported sports
+#   GET  /ratings/{sport}               — Get team ratings
+#   POST /predict/cricket               — Cricket match prediction
+#   POST /predict/football              — Football match prediction
+#   GET  /predictions/recent            — Recent predictions
+#   GET  /h2h/{team_a}/{team_b}         — Head-to-head analysis
+#   GET  /explain/{prediction_id}       — SHAP-based explanation
+#   GET  /docs                          — Interactive API docs
+# Analytics Endpoints:
+#   GET  /analytics/evaluation/{sport}  — Brier, log loss, ROC-AUC
+#   GET  /analytics/clv/{sport}         — Closing Line Value
+#   POST /analytics/ev                  — Expected Value + Kelly
+#   POST /analytics/season-simulation   — Monte Carlo season projection
+#   POST /analytics/playoff-simulation  — Bracket simulation
+#   GET  /analytics/rolling-performance — Rolling accuracy
+#   GET  /analytics/degradation         — Model degradation check
+#   GET  /analytics/edge-niches         — Profitable niches
 ```
 
 ## Adding a New Sport
@@ -90,7 +105,7 @@ python api_server.py  # Start on port 8000
 "NEW_SPORT": {"espn": "sport/league", "K": 25, "home": 40, "type": "team"}
 
 # 2. Add to season detection in get_active_sports()
-# 3. That's it — build_team_sport() handles everything via ESPN API
+# 3. That's it — build_team_sport() + SportMLEngine handle everything
 ```
 
 ## Environment Variables
