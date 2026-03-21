@@ -3,32 +3,50 @@ Oracle V2 — Universal ML Pipeline for ESPN Sports
 Adds ML-based predictions to NBA, NHL, MLB, NFL, UFC, MLS, College, Rugby, etc.
 
 Features are derived from match history (scores, dates, home/away) collected
-by multi_sport.py. No external data sources required beyond ESPN.
+by multi_sport.py, plus roster data from ESPN teams API.
 
-Feature set (~20 features per matchup):
-- Rolling win rate (last 5, 10, 20 games)
-- Rolling margin of victory
-- Win/loss streak momentum
-- Rest days since last game
-- Home/away performance splits
-- Strength of schedule (opponent Elo average)
-- Head-to-head record
-- Elo ratings + Elo probability
-- Recent form velocity (trend direction)
-- Consistency (variance in margins)
+Feature set (35 features per matchup):
+- Elo ratings + probability (4)
+- Rolling win rate at 5/10 game windows (6)
+- Rolling margin of victory (3)
+- Win/loss streak momentum (3)
+- Rest days since last game (3)
+- Home/away performance splits (2)
+- Head-to-head record (1)
+- Strength of schedule (3)
+- Consistency & form velocity (4)
+- Roster stability signals (6): new player count, avg experience, injury count,
+  roster turnover rate, experience differential, injury differential
+
+Models (up to 12):
+- RandomForest, GradientBoosting, LogisticRegression, AdaBoost, SVM, Bagging,
+  NaiveBayes, XGBoost*, LightGBM*, VotingClassifier, StackingMeta
+  (* = if installed)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
+import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import (
+    AdaBoostClassifier,
+    BaggingClassifier,
+    GradientBoostingClassifier,
+    RandomForestClassifier,
+    VotingClassifier,
+)
 from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 
 try:
     import xgboost as xgb
@@ -47,36 +65,224 @@ except ImportError:
 logger = logging.getLogger("oracle.ml_sports")
 
 FEATURE_NAMES = [
+    # Elo (4)
     "elo_a",
     "elo_b",
     "elo_diff",
     "elo_prob",
+    # Win rates (6)
     "win_rate_5_a",
     "win_rate_5_b",
     "win_rate_10_a",
     "win_rate_10_b",
     "win_rate_diff_5",
     "win_rate_diff_10",
+    # Margins (3)
     "avg_margin_5_a",
     "avg_margin_5_b",
     "margin_diff",
+    # Streaks (3)
     "streak_a",
     "streak_b",
     "streak_diff",
+    # Rest (3)
     "rest_days_a",
     "rest_days_b",
     "rest_diff",
+    # Home/Away (2)
     "home_win_rate_a",
     "away_win_rate_b",
+    # H2H (1)
     "h2h_win_rate_a",
+    # SOS (3)
     "sos_a",
     "sos_b",
     "sos_diff",
+    # Form (4)
     "consistency_a",
     "consistency_b",
     "form_velocity_a",
     "form_velocity_b",
+    # Roster (6)
+    "roster_new_players_a",
+    "roster_new_players_b",
+    "roster_avg_exp_a",
+    "roster_avg_exp_b",
+    "roster_injured_a",
+    "roster_injured_b",
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ROSTER TRACKER — Detects player changes before every match
+# ═══════════════════════════════════════════════════════════════════════════
+
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+CACHE_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / ".cache"
+
+
+class RosterTracker:
+    """Tracks team rosters and detects new/changed players.
+
+    Fetches current roster from ESPN teams API, compares against
+    previous snapshot, and computes roster stability signals.
+    """
+
+    def __init__(self, espn_path: str):
+        self.espn_path = espn_path
+        self._rosters: dict[str, dict] = {}
+        self._previous_rosters: dict[str, set[str]] = {}
+        self._team_ids: dict[str, str] = {}
+        self._loaded = False
+
+    def _fetch_cached(self, url: str, cache_key: str, ttl_hours: float = 6) -> dict | None:
+        CACHE_DIR.mkdir(exist_ok=True)
+        cf = CACHE_DIR / f"{cache_key}.json"
+        if cf.exists() and (time.time() - cf.stat().st_mtime) / 3600 < ttl_hours:
+            with open(cf) as f:
+                return json.load(f)
+        try:
+            import requests
+
+            r = requests.get(url, timeout=15, headers={"User-Agent": "OracleV2/3.1"})
+            if r.status_code == 200:
+                data = r.json()
+                with open(cf, "w") as f:
+                    json.dump(data, f)
+                return data
+        except Exception:
+            pass
+        return None
+
+    def _load_team_ids(self):
+        """Fetch team list from ESPN to map display names to IDs."""
+        if self._loaded:
+            return
+        data = self._fetch_cached(
+            f"{ESPN_BASE}/{self.espn_path}/teams",
+            f"teams_{self.espn_path.replace('/', '_')}",
+            ttl_hours=24,
+        )
+        if not data:
+            self._loaded = True
+            return
+        for sport in data.get("sports", []):
+            for league in sport.get("leagues", []):
+                for t in league.get("teams", []):
+                    team = t.get("team", {})
+                    name = team.get("displayName", "")
+                    tid = team.get("id", "")
+                    if name and tid:
+                        self._team_ids[name] = tid
+        self._loaded = True
+
+    def fetch_roster(self, team_name: str) -> dict:
+        """Fetch current roster for a team. Returns roster info dict.
+
+        Returns:
+            {
+                "players": set of player names,
+                "avg_experience": float (years),
+                "injured_count": int,
+                "total": int,
+            }
+        """
+        self._load_team_ids()
+        tid = self._team_ids.get(team_name, "")
+        if not tid:
+            return {"players": set(), "avg_experience": 0.0, "injured_count": 0, "total": 0}
+
+        data = self._fetch_cached(
+            f"{ESPN_BASE}/{self.espn_path}/teams/{tid}/roster",
+            f"roster_{self.espn_path.replace('/', '_')}_{tid}",
+            ttl_hours=6,
+        )
+        if not data:
+            return {"players": set(), "avg_experience": 0.0, "injured_count": 0, "total": 0}
+
+        players = set()
+        experiences = []
+        injured = 0
+
+        athletes = data.get("athletes", [])
+        for entry in athletes:
+            # ESPN may return athletes as flat list or grouped by position
+            if isinstance(entry, dict):
+                items = entry.get("items", [])
+                if items:
+                    for a in items:
+                        self._parse_athlete(a, players, experiences)
+                        if a.get("injuries"):
+                            injured += 1
+                elif "fullName" in entry:
+                    self._parse_athlete(entry, players, experiences)
+                    if entry.get("injuries"):
+                        injured += 1
+
+        avg_exp = sum(experiences) / len(experiences) if experiences else 0.0
+        return {
+            "players": players,
+            "avg_experience": round(avg_exp, 1),
+            "injured_count": injured,
+            "total": len(players),
+        }
+
+    def _parse_athlete(self, athlete: dict, players: set, experiences: list):
+        name = athlete.get("fullName") or athlete.get("displayName", "")
+        if name:
+            players.add(name)
+        exp = athlete.get("experience", {})
+        if isinstance(exp, dict):
+            years = exp.get("years", 0)
+        else:
+            years = 0
+        experiences.append(years)
+
+    def check_roster(self, team_name: str) -> dict:
+        """Check roster and compute change signals vs previous snapshot.
+
+        Returns:
+            {
+                "new_players": int,
+                "departed_players": int,
+                "turnover_rate": float,
+                "avg_experience": float,
+                "injured_count": int,
+                "total": int,
+            }
+        """
+        current = self.fetch_roster(team_name)
+        current_players = current["players"]
+        previous = self._previous_rosters.get(team_name, set())
+
+        new_players = len(current_players - previous) if previous else 0
+        departed = len(previous - current_players) if previous else 0
+        turnover = (new_players + departed) / max(len(previous), 1) if previous else 0.0
+
+        # Update snapshot
+        self._previous_rosters[team_name] = current_players
+        self._rosters[team_name] = current
+
+        return {
+            "new_players": new_players,
+            "departed_players": departed,
+            "turnover_rate": round(turnover, 3),
+            "avg_experience": current["avg_experience"],
+            "injured_count": current["injured_count"],
+            "total": current["total"],
+        }
+
+    def get_cached_info(self, team_name: str) -> dict:
+        """Get roster info without re-fetching (for feature extraction during training)."""
+        if team_name in self._rosters:
+            r = self._rosters[team_name]
+            return {
+                "new_players": 0,
+                "avg_experience": r["avg_experience"],
+                "injured_count": r["injured_count"],
+                "total": r["total"],
+            }
+        return {"new_players": 0, "avg_experience": 0.0, "injured_count": 0, "total": 0}
 
 
 class TeamStats:
@@ -175,8 +381,10 @@ def extract_features(
     stats: dict[str, TeamStats],
     h2h: dict[tuple[str, str], list[int]],
     home_adv: float,
+    roster_a: dict | None = None,
+    roster_b: dict | None = None,
 ) -> np.ndarray:
-    """Extract ~29 ML features for a matchup from accumulated stats."""
+    """Extract 35 ML features for a matchup from accumulated stats + roster."""
     sa = stats.get(team_a, TeamStats())
     sb = stats.get(team_b, TeamStats())
 
@@ -218,6 +426,16 @@ def extract_features(
     vel_a = sa.form_velocity()
     vel_b = sb.form_velocity()
 
+    # Roster features (default to neutral if unavailable)
+    ra = roster_a or {}
+    rb = roster_b or {}
+    new_a = ra.get("new_players", 0)
+    new_b = rb.get("new_players", 0)
+    exp_a = ra.get("avg_experience", 0.0)
+    exp_b = rb.get("avg_experience", 0.0)
+    inj_a = ra.get("injured_count", 0)
+    inj_b = rb.get("injured_count", 0)
+
     return np.array(
         [
             elo_a / 2000,
@@ -249,18 +467,38 @@ def extract_features(
             cons_b / 20,
             vel_a,
             vel_b,
+            # Roster features
+            min(new_a, 5) / 5,
+            min(new_b, 5) / 5,
+            min(exp_a, 15) / 15,
+            min(exp_b, 15) / 15,
+            min(inj_a, 10) / 10,
+            min(inj_b, 10) / 10,
         ]
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MODEL ENSEMBLE — 12 models matching cricket engine coverage
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 def _build_models() -> dict:
-    """Build ML model ensemble for sport prediction."""
+    """Build full ML model ensemble for sport prediction.
+
+    Up to 12 models: RF, GBM, LR, AdaBoost, SVM, Bagging, NaiveBayes,
+    XGBoost*, LightGBM*, plus VotingClassifier and Stacking meta-learner.
+    """
     models: dict = {
         "RandomForest": RandomForestClassifier(n_estimators=200, max_depth=8, min_samples_leaf=5, random_state=42),
         "GradientBoosting": GradientBoostingClassifier(
             n_estimators=150, max_depth=5, learning_rate=0.08, random_state=42
         ),
         "LogisticRegression": LogisticRegression(max_iter=2000, random_state=42),
+        "AdaBoost": AdaBoostClassifier(n_estimators=100, learning_rate=0.1, random_state=42),
+        "SVM": SVC(kernel="rbf", probability=True, C=1.0, gamma="scale", random_state=42),
+        "Bagging": BaggingClassifier(n_estimators=100, max_samples=0.8, random_state=42),
+        "NaiveBayes": GaussianNB(),
     }
     if HAS_XGB:
         models["XGBoost"] = xgb.XGBClassifier(
@@ -285,14 +523,25 @@ def _build_models() -> dict:
     return models
 
 
+def _build_super_ensemble(base_models: dict) -> VotingClassifier | None:
+    """Build a VotingClassifier from trained base models."""
+    estimators = [
+        (name.replace(" ", "_")[:20], model) for name, model in base_models.items() if hasattr(model, "predict_proba")
+    ]
+    if len(estimators) < 2:
+        return None
+    return VotingClassifier(estimators=estimators, voting="soft")
+
+
 class SportMLEngine:
     """Universal ML prediction engine for any ESPN-based sport.
 
     Collects match history, extracts features, trains ensemble models,
-    and blends ML predictions with Elo ratings.
+    and blends ML predictions with Elo ratings. Includes roster change
+    detection for prediction-time adjustments.
     """
 
-    def __init__(self, sport_key: str, K: int = 25, home_adv: float = 50):
+    def __init__(self, sport_key: str, K: int = 25, home_adv: float = 50, espn_path: str = ""):
         self.sport_key = sport_key
         self.K = K
         self.home_adv = home_adv
@@ -304,12 +553,18 @@ class SportMLEngine:
         # ML state
         self.scaler = StandardScaler()
         self.models: dict = {}
+        self.meta_learner: LogisticRegression | None = None
         self.is_trained = False
 
         # History tracking
         self.stats: dict[str, TeamStats] = defaultdict(TeamStats)
         self.h2h: dict[tuple[str, str], list[int]] = defaultdict(list)
         self.match_history: list[dict] = []
+
+        # Roster tracker
+        self.roster_tracker: RosterTracker | None = None
+        if espn_path:
+            self.roster_tracker = RosterTracker(espn_path)
 
     def _elo_update(self, winner: str, loser: str, home_team: str | None, margin: float):
         """Update Elo ratings after a match."""
@@ -373,13 +628,12 @@ class SportMLEngine:
             return {"error": f"Need {min_matches}+ matches, have {len(self.match_history)}"}
 
         # Rebuild features using walk-forward approach
-        # We need to re-accumulate stats chronologically
         wf_stats: dict[str, TeamStats] = defaultdict(TeamStats)
         wf_h2h: dict[tuple[str, str], list[int]] = defaultdict(list)
         wf_elo: dict[str, float] = defaultdict(lambda: 1500.0)
 
         X, y = [], []
-        skip_first = max(min_matches // 3, 10)  # Skip early matches with insufficient history
+        skip_first = max(min_matches // 3, 10)
 
         for i, m in enumerate(self.match_history):
             ta, tb = m["team_a"], m["team_b"]
@@ -427,28 +681,77 @@ class SportMLEngine:
         self.scaler.fit(X)
         X_scaled = self.scaler.transform(X)
 
-        # Train models
+        # Train base models
         self.models = _build_models()
-        cv_scores = {}
-        for name, model in self.models.items():
+        trained_names = []
+        failed = []
+        for name, model in list(self.models.items()):
             try:
                 model.fit(X_scaled, y)
-                cv_scores[name] = name
+                trained_names.append(name)
             except Exception as e:
                 logger.warning(f"Model {name} failed for {self.sport_key}: {e}")
+                del self.models[name]
+                failed.append(name)
+
+        # Super ensemble (VotingClassifier over all base models)
+        super_ens = _build_super_ensemble(self.models)
+        if super_ens:
+            try:
+                super_ens.fit(X_scaled, y)
+                self.models["SuperEnsemble"] = super_ens
+                trained_names.append("SuperEnsemble")
+            except Exception as e:
+                logger.debug(f"SuperEnsemble failed: {e}")
+
+        # Stacking meta-learner: LogisticRegression on base model outputs
+        self.meta_learner = None
+        if len(X_scaled) >= 20 and len(self.models) >= 3:
+            meta_features = []
+            for xi in X_scaled:
+                row = []
+                for model in self.models.values():
+                    if hasattr(model, "predict_proba"):
+                        try:
+                            p = model.predict_proba(xi.reshape(1, -1))[0]
+                            row.append(p[1] if len(p) > 1 else p[0])
+                        except Exception:
+                            row.append(0.5)
+                meta_features.append(row)
+
+            if meta_features and len(meta_features[0]) >= 2:
+                meta_X = np.array(meta_features)
+                meta_X = np.nan_to_num(meta_X, nan=0.5, posinf=0.5, neginf=0.5)
+                try:
+                    self.meta_learner = LogisticRegression(max_iter=2000, random_state=42)
+                    self.meta_learner.fit(meta_X, y)
+                    trained_names.append("StackingMeta")
+                except Exception as e:
+                    logger.debug(f"Stacking meta-learner failed: {e}")
+                    self.meta_learner = None
 
         self.is_trained = len(self.models) > 0
         return {
             "sport": self.sport_key,
             "training_samples": len(X),
-            "models_trained": len(self.models),
-            "model_names": list(self.models.keys()),
+            "models_trained": len(self.models) + (1 if self.meta_learner else 0),
+            "model_names": trained_names,
+            "failed": failed,
         }
 
-    def predict(self, team_a: str, team_b: str, home_team: str | None, match_date: str) -> dict:
+    def predict(
+        self,
+        team_a: str,
+        team_b: str,
+        home_team: str | None,
+        match_date: str,
+        roster_a: dict | None = None,
+        roster_b: dict | None = None,
+    ) -> dict:
         """Predict match outcome using ML ensemble + Elo blend.
 
-        Returns prediction dict with probabilities and confidence.
+        Optionally accepts roster dicts for roster-aware features.
+        If roster_tracker is set and no roster provided, auto-fetches.
         """
         elo_a = self.elo[team_a]
         elo_b = self.elo[team_b]
@@ -458,10 +761,15 @@ class SportMLEngine:
         elo_prob = 1 / (1 + 10 ** ((elo_b - (elo_a + ha)) / 400))
 
         if not self.is_trained:
-            # Fallback to pure Elo
             pa = round(elo_prob * 100, 1)
             pb = round((1 - elo_prob) * 100, 1)
             return self._format_prediction(team_a, team_b, pa, pb, method="elo")
+
+        # Auto-fetch roster if tracker available and not provided
+        if self.roster_tracker and roster_a is None:
+            roster_a = self.roster_tracker.check_roster(team_a)
+        if self.roster_tracker and roster_b is None:
+            roster_b = self.roster_tracker.check_roster(team_b)
 
         # ML prediction
         features = extract_features(
@@ -474,6 +782,8 @@ class SportMLEngine:
             self.stats,
             self.h2h,
             self.home_adv,
+            roster_a,
+            roster_b,
         )
         features_scaled = self.scaler.transform(features.reshape(1, -1))
 
@@ -489,6 +799,18 @@ class SportMLEngine:
             except Exception:
                 continue
 
+        # Stacking meta-learner prediction
+        if self.meta_learner and probs:
+            meta_input = np.array([list(model_votes.values())])
+            meta_input = np.nan_to_num(meta_input, nan=0.5, posinf=0.5, neginf=0.5)
+            try:
+                meta_p = self.meta_learner.predict_proba(meta_input)[0]
+                meta_prob = meta_p[1] if len(meta_p) > 1 else meta_p[0]
+                probs.append(meta_prob)
+                model_votes["StackingMeta"] = round(meta_prob, 3)
+            except Exception:
+                pass
+
         if not probs:
             pa = round(elo_prob * 100, 1)
             pb = round((1 - elo_prob) * 100, 1)
@@ -497,18 +819,18 @@ class SportMLEngine:
         ml_prob = float(np.mean(probs))
         ml_std = float(np.std(probs))
 
-        # Blend ML (70%) with Elo (30%) — Elo stabilizes when ML data is thin
+        # Blend ML (70%) with Elo (30%)
         blended = 0.7 * ml_prob + 0.3 * elo_prob
         pa = round(blended * 100, 1)
         pb = round((1 - blended) * 100, 1)
 
         # Confidence based on agreement + distance from 50%
         diff = abs(pa - 50)
-        agreement_penalty = max(0, ml_std - 0.15) * 30  # penalize when models disagree
+        agreement_penalty = max(0, ml_std - 0.15) * 30
         adjusted_diff = max(diff - agreement_penalty, 0)
         conf = "HIGH" if adjusted_diff > 15 else "MODERATE" if adjusted_diff > 7 else "LOW"
 
-        return self._format_prediction(
+        result = self._format_prediction(
             team_a,
             team_b,
             pa,
@@ -520,6 +842,14 @@ class SportMLEngine:
             elo_prob=round(elo_prob, 3),
             model_std=round(ml_std, 3),
         )
+
+        # Attach roster change alerts
+        if roster_a and roster_a.get("new_players", 0) > 0:
+            result["roster_alert_a"] = f"{roster_a['new_players']} new player(s)"
+        if roster_b and roster_b.get("new_players", 0) > 0:
+            result["roster_alert_b"] = f"{roster_b['new_players']} new player(s)"
+
+        return result
 
     def _format_prediction(
         self,

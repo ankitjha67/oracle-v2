@@ -196,7 +196,7 @@ def build_team_sport(sport_key, days_back=30, days_ahead=7):
     from ml_sports import SportMLEngine
 
     cfg = SPORTS[sport_key]
-    engine = SportMLEngine(sport_key, K=cfg["K"], home_adv=cfg["home"])
+    engine = SportMLEngine(sport_key, K=cfg["K"], home_adv=cfg["home"], espn_path=cfg["espn"])
 
     # Collect results chronologically (oldest first for walk-forward training)
     raw_results = []

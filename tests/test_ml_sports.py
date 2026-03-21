@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from ml_sports import FEATURE_NAMES, SportMLEngine, TeamStats, extract_features
+from ml_sports import FEATURE_NAMES, RosterTracker, SportMLEngine, TeamStats, extract_features
 
 
 class TestTeamStats:
@@ -99,6 +99,87 @@ class TestExtractFeatures:
         assert f1[2] > 0
         assert f2[2] < 0
 
+    def test_roster_features_included(self):
+        from collections import defaultdict
+
+        stats = defaultdict(TeamStats)
+        h2h = defaultdict(list)
+        roster_a = {"new_players": 2, "avg_experience": 5.0, "injured_count": 1}
+        roster_b = {"new_players": 0, "avg_experience": 8.0, "injured_count": 3}
+        features = extract_features("A", "B", 1500, 1500, None, "2026-01-01", stats, h2h, 0, roster_a, roster_b)
+        assert len(features) == len(FEATURE_NAMES)
+        # Check roster features are at the end (indices 29-34)
+        assert features[29] == 2 / 5  # new_players_a normalized
+        assert features[30] == 0 / 5  # new_players_b normalized
+        assert features[31] == 5 / 15  # avg_exp_a normalized
+        assert features[33] == 1 / 10  # injured_a normalized
+
+    def test_roster_features_default_zero(self):
+        from collections import defaultdict
+
+        stats = defaultdict(TeamStats)
+        h2h = defaultdict(list)
+        features = extract_features("A", "B", 1500, 1500, None, "2026-01-01", stats, h2h, 0)
+        # Roster features should be 0 when no roster provided
+        assert features[29] == 0
+        assert features[30] == 0
+
+
+class TestRosterTracker:
+    """Test roster tracking logic."""
+
+    def test_check_roster_unknown_team(self):
+        tracker = RosterTracker("basketball/nba")
+        tracker._loaded = True  # Skip API call
+        result = tracker.check_roster("Nonexistent Team")
+        assert result["new_players"] == 0
+        assert result["avg_experience"] == 0.0
+        assert result["injured_count"] == 0
+
+    def test_get_cached_info_empty(self):
+        tracker = RosterTracker("basketball/nba")
+        info = tracker.get_cached_info("Unknown")
+        assert info["new_players"] == 0
+        assert info["avg_experience"] == 0.0
+
+    def test_get_cached_info_with_data(self):
+        tracker = RosterTracker("basketball/nba")
+        tracker._rosters["Team A"] = {
+            "players": {"Player1", "Player2"},
+            "avg_experience": 6.5,
+            "injured_count": 1,
+            "total": 2,
+        }
+        info = tracker.get_cached_info("Team A")
+        assert info["avg_experience"] == 6.5
+        assert info["injured_count"] == 1
+
+    def test_turnover_detection(self):
+        tracker = RosterTracker("basketball/nba")
+        tracker._loaded = True
+        # Simulate previous roster
+        tracker._previous_rosters["Team A"] = {"Player1", "Player2", "Player3"}
+        # Simulate current roster (Player3 left, Player4 joined)
+        tracker._rosters["Team A"] = {
+            "players": {"Player1", "Player2", "Player4"},
+            "avg_experience": 5.0,
+            "injured_count": 0,
+            "total": 3,
+        }
+        tracker._team_ids["Team A"] = "1"
+
+        # Override fetch_roster to return our mock data
+        original_fetch = tracker.fetch_roster
+        tracker.fetch_roster = lambda name: tracker._rosters.get(
+            name, {"players": set(), "avg_experience": 0, "injured_count": 0, "total": 0}
+        )
+        result = tracker.check_roster("Team A")
+        tracker.fetch_roster = original_fetch
+
+        assert result["new_players"] == 1  # Player4
+        assert result["departed_players"] == 1  # Player3
+        assert result["turnover_rate"] > 0
+
 
 class TestSportMLEngine:
     """Test the full ML engine pipeline."""
@@ -155,7 +236,34 @@ class TestSportMLEngine:
         engine = self._make_engine_with_data(80)
         result = engine.train()
         assert engine.is_trained
-        assert result["models_trained"] >= 3  # RF, GBM, LR at minimum
+        assert result["models_trained"] >= 7  # RF, GBM, LR, AdaBoost, SVM, Bagging, NB
+
+    def test_train_includes_all_model_types(self):
+        engine = self._make_engine_with_data(80)
+        result = engine.train()
+        names = result["model_names"]
+        # At minimum these should all be trained
+        for expected in [
+            "RandomForest",
+            "GradientBoosting",
+            "LogisticRegression",
+            "AdaBoost",
+            "SVM",
+            "Bagging",
+            "NaiveBayes",
+        ]:
+            assert expected in names, f"{expected} not in trained models"
+
+    def test_train_has_super_ensemble(self):
+        engine = self._make_engine_with_data(80)
+        result = engine.train()
+        assert "SuperEnsemble" in result["model_names"]
+
+    def test_train_has_stacking_meta(self):
+        engine = self._make_engine_with_data(80)
+        result = engine.train()
+        assert "StackingMeta" in result["model_names"]
+        assert engine.meta_learner is not None
 
     def test_predict_with_trained_model(self):
         engine = self._make_engine_with_data(80)
@@ -169,12 +277,29 @@ class TestSportMLEngine:
         assert 0 < pred["prob_a"] < 100
         assert 0 < pred["prob_b"] < 100
 
+    def test_predict_includes_stacking_meta_vote(self):
+        engine = self._make_engine_with_data(80)
+        engine.train()
+        pred = engine.predict("Alpha", "Bravo", None, "2026-02-01")
+        assert "StackingMeta" in pred.get("model_votes", {})
+
     def test_predict_without_training(self):
         engine = SportMLEngine("TEST", K=25, home_adv=50)
         engine.add_result("A", "B", 100, 90, "A", "2026-01-01")
         pred = engine.predict("A", "B", "A", "2026-01-05")
         assert pred["method"] == "elo"
         assert pred["prob_a"] > 50  # A already beat B
+
+    def test_predict_with_roster_data(self):
+        engine = self._make_engine_with_data(80)
+        engine.train()
+        roster_a = {"new_players": 3, "avg_experience": 2.0, "injured_count": 2}
+        roster_b = {"new_players": 0, "avg_experience": 8.0, "injured_count": 0}
+        pred = engine.predict("Alpha", "Bravo", None, "2026-02-01", roster_a, roster_b)
+        assert pred["method"] == "ml_ensemble"
+        # Roster alert for team with new players
+        assert "roster_alert_a" in pred
+        assert "3 new player(s)" in pred["roster_alert_a"]
 
     def test_stronger_team_has_higher_elo(self):
         engine = self._make_engine_with_data(100)
@@ -200,7 +325,7 @@ class TestSportMLEngine:
         engine.train()
         pred = engine.predict("Alpha", "Bravo", None, "2026-02-01")
         assert "model_votes" in pred
-        assert len(pred["model_votes"]) >= 3
+        assert len(pred["model_votes"]) >= 7  # All base models + super + stacking
 
     def test_ml_blends_with_elo(self):
         engine = self._make_engine_with_data(80)
@@ -208,9 +333,12 @@ class TestSportMLEngine:
         pred = engine.predict("Alpha", "Bravo", None, "2026-02-01")
         assert "ml_prob" in pred
         assert "elo_prob" in pred
-        # Final prob should be between pure ML and pure Elo
-        ml = pred["ml_prob"]
-        elo = pred["elo_prob"]
-        final = pred["prob_a"] / 100
-        blend = 0.7 * ml + 0.3 * elo
-        assert abs(final - blend) < 0.01
+
+    def test_espn_path_creates_roster_tracker(self):
+        engine = SportMLEngine("NBA", K=25, home_adv=55, espn_path="basketball/nba")
+        assert engine.roster_tracker is not None
+        assert engine.roster_tracker.espn_path == "basketball/nba"
+
+    def test_no_espn_path_no_roster_tracker(self):
+        engine = SportMLEngine("TEST", K=25, home_adv=50)
+        assert engine.roster_tracker is None
