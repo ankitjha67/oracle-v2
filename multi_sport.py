@@ -188,12 +188,19 @@ def _parse_fight_event(event):
 # SPORT-SPECIFIC PIPELINES
 # ═══════════════════════════════════════════════════════════════════════
 def build_team_sport(sport_key, days_back=30, days_ahead=7):
-    """NBA, NHL, MLB, NFL — standard team sport pipeline."""
+    """NBA, NHL, MLB, NFL — ML-enhanced team sport pipeline.
+
+    Collects match history, trains ML ensemble (RF, GBM, XGB, LGB, LR),
+    and blends with Elo for final predictions.
+    """
+    from ml_sports import SportMLEngine
+
     cfg = SPORTS[sport_key]
-    elo = SportElo(1500, cfg["K"], cfg["home"])
-    # Build Elo from recent results — check every day
-    results = []
-    for d in range(days_back):
+    engine = SportMLEngine(sport_key, K=cfg["K"], home_adv=cfg["home"])
+
+    # Collect results chronologically (oldest first for walk-forward training)
+    raw_results = []
+    for d in range(days_back, -1, -1):
         dt = (datetime.now() - timedelta(days=d)).strftime("%Y%m%d")
         data = _fetch(f"{ESPN}/{cfg['espn']}/scoreboard?dates={dt}", f"h_{sport_key}_{dt}", 24)
         if not data:
@@ -204,10 +211,22 @@ def build_team_sport(sport_key, days_back=30, days_ahead=7):
                 continue
             if p["score0"] == p["score1"]:
                 continue
-            w, l = (p["name0"], p["name1"]) if p["score0"] > p["score1"] else (p["name1"], p["name0"])
-            elo.update(w, l, p["home"], abs(p["score0"] - p["score1"]))
-            results.append({"winner": w, "loser": l, "score": f"{p['score0']}-{p['score1']}", "date": p["date"]})
-    # Fetch upcoming
+            raw_results.append(p)
+
+    # Feed results to ML engine
+    for p in raw_results:
+        engine.add_result(p["name0"], p["name1"], p["score0"], p["score1"], p["home"], p["date"])
+
+    # Train ML models
+    train_info = engine.train()
+    ml_active = engine.is_trained
+    if ml_active:
+        logger.info(
+            f"{sport_key}: ML trained on {train_info.get('training_samples', 0)} samples "
+            f"with {train_info.get('models_trained', 0)} models"
+        )
+
+    # Fetch upcoming and predict
     preds = []
     for d in range(0, days_ahead + 1):
         dt = (datetime.now() + timedelta(days=d)).strftime("%Y%m%d")
@@ -218,36 +237,39 @@ def build_team_sport(sport_key, days_back=30, days_ahead=7):
             p = _parse_team_event(ev)
             if not p or "SCHEDULED" not in p["status"].upper():
                 continue
-            pa, pb = elo.predict(p["name0"], p["name1"], p["home"])
-            winner = p["name0"] if pa > 50 else p["name1"]
-            diff = abs(pa - 50)
-            conf = "HIGH" if diff > 15 else "MODERATE" if diff > 7 else "LOW"
+            pred = engine.predict(p["name0"], p["name1"], p["home"], p["date"])
             preds.append(
                 {
                     "match": f"{p['name0']} vs {p['name1']}",
                     "date": p["date"],
                     "venue": p["venue"],
                     "sport": sport_key,
-                    "prediction": {"winner": winner, "prob_a": pa, "prob_b": pb, "confidence": conf},
-                    "elo": {"a": round(elo.ratings[p["name0"]], 1), "b": round(elo.ratings[p["name1"]], 1)},
+                    "prediction": pred,
+                    "elo": {"a": round(engine.elo[p["name0"]], 1), "b": round(engine.elo[p["name1"]], 1)},
                     "home": p["home"],
                 }
             )
     return {
         "sport": sport_key,
-        "results_used": len(results),
-        "teams": len(elo.ratings),
-        "rankings": elo.rankings(20),
+        "results_used": len(raw_results),
+        "teams": len(engine.elo),
+        "rankings": engine.rankings(20),
         "predictions": preds,
+        "ml_active": ml_active,
+        "training_info": train_info,
     }
 
 
 def build_ufc(days_back=60, days_ahead=14):
-    """UFC — fighter-level predictions from ESPN."""
-    elo = SportElo(1500, 40, 0)
-    # Build Elo from recent fight results — check every day
+    """UFC — ML-enhanced fighter-level predictions from ESPN."""
+    from ml_sports import SportMLEngine
+
+    engine = SportMLEngine("UFC", K=40, home_adv=0)
+    elo_legacy = SportElo(1500, 40, 0)  # for record-based priors
+
+    # Build from recent fight results (chronological)
     results = []
-    for d in range(days_back):
+    for d in range(days_back, -1, -1):
         dt = (datetime.now() - timedelta(days=d)).strftime("%Y%m%d")
         data = _fetch(f"{ESPN}/mma/ufc/scoreboard?dates={dt}", f"h_ufc_{dt}", 24)
         if not data:
@@ -256,8 +278,15 @@ def build_ufc(days_back=60, days_ahead=14):
             for fight in _parse_fight_event(ev):
                 if fight["winner"]:
                     loser = fight["fighter_b"] if fight["winner"] == fight["fighter_a"] else fight["fighter_a"]
-                    elo.update(fight["winner"], loser)
+                    # Feed to ML engine
+                    w_score, l_score = 1, 0  # UFC: binary win/loss
+                    if fight["winner"] == fight["fighter_a"]:
+                        engine.add_result(fight["fighter_a"], fight["fighter_b"], w_score, l_score, None, fight["date"])
+                    else:
+                        engine.add_result(fight["fighter_a"], fight["fighter_b"], l_score, w_score, None, fight["date"])
+                    elo_legacy.update(fight["winner"], loser)
                     results.append(fight)
+
     # Set priors from records for upcoming fighters
     for d in range(0, days_ahead + 1):
         dt_str = (datetime.now() + timedelta(days=d)).strftime("%Y%m%d")
@@ -267,9 +296,13 @@ def build_ufc(days_back=60, days_ahead=14):
         for ev in data_up.get("events", []):
             for fight in _parse_fight_event(ev):
                 if fight["fighter_a"] != "?" and fight["record_a"]:
-                    elo.set_prior_from_record(fight["fighter_a"], fight["record_a"])
+                    elo_legacy.set_prior_from_record(fight["fighter_a"], fight["record_a"])
                 if fight["fighter_b"] != "?" and fight["record_b"]:
-                    elo.set_prior_from_record(fight["fighter_b"], fight["record_b"])
+                    elo_legacy.set_prior_from_record(fight["fighter_b"], fight["record_b"])
+
+    # Train ML models
+    train_info = engine.train()
+    ml_active = engine.is_trained
 
     # Upcoming
     preds = []
@@ -284,30 +317,29 @@ def build_ufc(days_back=60, days_ahead=14):
                     continue
                 if fight["fighter_a"] == "?" or fight["fighter_b"] == "?":
                     continue
-                pa, pb = elo.predict(fight["fighter_a"], fight["fighter_b"])
-                winner = fight["fighter_a"] if pa > 50 else fight["fighter_b"]
-                diff = abs(pa - 50)
-                conf = "HIGH" if diff > 15 else "MODERATE" if diff > 7 else "LOW"
+                pred = engine.predict(fight["fighter_a"], fight["fighter_b"], None, fight["date"])
                 preds.append(
                     {
                         "match": f"{fight['fighter_a']} vs {fight['fighter_b']}",
                         "date": fight["date"],
                         "event": fight["event_name"],
                         "sport": "UFC",
-                        "prediction": {"winner": winner, "prob_a": pa, "prob_b": pb, "confidence": conf},
+                        "prediction": pred,
                         "records": {"a": fight["record_a"], "b": fight["record_b"]},
                         "elo": {
-                            "a": round(elo.ratings[fight["fighter_a"]], 1),
-                            "b": round(elo.ratings[fight["fighter_b"]], 1),
+                            "a": round(engine.elo[fight["fighter_a"]], 1),
+                            "b": round(engine.elo[fight["fighter_b"]], 1),
                         },
                     }
                 )
     return {
         "sport": "UFC",
         "results_used": len(results),
-        "fighters": len(elo.ratings),
-        "rankings": elo.rankings(20),
+        "fighters": len(engine.elo),
+        "rankings": engine.rankings(20),
         "predictions": preds,
+        "ml_active": ml_active,
+        "training_info": train_info,
     }
 
 
@@ -439,7 +471,8 @@ def run_all_sports(sport_keys=None, days_back=30, days_ahead=7):
 
         print(f"    Built from: {result.get('results_used', result.get('drivers', 0))} results")
         n_entities = result.get("teams", result.get("fighters", result.get("drivers", 0)))
-        print(f"    Rated: {n_entities} | Upcoming: {n}")
+        ml_tag = " | ML: active" if result.get("ml_active") else ""
+        print(f"    Rated: {n_entities} | Upcoming: {n}{ml_tag}")
 
         # Show rankings
         for i, (t, r) in enumerate(list(result.get("rankings", {}).items())[:5]):
