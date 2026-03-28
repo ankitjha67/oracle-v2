@@ -110,6 +110,7 @@ from football_pipeline import (  # noqa: E402
     predict_upcoming,
 )
 from multi_sport import enrich_sport_with_sentiment, run_all_sports  # noqa: E402
+from outcome_tracker import run_outcome_tracking, store_prediction  # noqa: E402
 from sentiment import enrich_predictions_with_sentiment  # noqa: E402
 
 
@@ -883,6 +884,17 @@ def run_football(R):
         print(f"    📊 Sentiment data from {n_sent} matches (DraftKings via ESPN)")
     R["football_predictions"] = preds
     R["_audit"]["B5_preds"] = f"✅ {len(preds)} matches ({R['fixtures_source']})"
+    # Store predictions in DB for outcome tracking
+    try:
+        tracker_db = OracleDB(str(OUTPUT_DIR / "oracle.db"))
+        stored = 0
+        for p in preds:
+            if store_prediction(tracker_db, p, sport=p.get("league", "football")):
+                stored += 1
+        if stored:
+            print(f"    💾 {stored} predictions stored for outcome tracking")
+    except Exception as e:
+        logger.debug(f"Prediction storage: {e}")
     for p in preds:
         o = p["oracle_prediction"]
         sp = p.get("score_prediction", {})
@@ -943,6 +955,18 @@ def run_multi(R):
         enrich_sport_with_sentiment(result, sport_key, ODDS_API_KEY or None)
     R["multi_sport"] = results
     R["_audit"]["C_multi"] = f"✅ {len(results)} sports, {total} predictions"
+    # Store multi-sport predictions in DB for outcome tracking
+    try:
+        tracker_db = OracleDB(str(OUTPUT_DIR / "oracle.db"))
+        stored = 0
+        for sport_key, result in results.items():
+            for p in result.get("predictions", []):
+                if store_prediction(tracker_db, p, sport=sport_key):
+                    stored += 1
+        if stored:
+            print(f"  💾 {stored} multi-sport predictions stored for outcome tracking")
+    except Exception as e:
+        logger.debug(f"Multi-sport prediction storage: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -964,6 +988,27 @@ def run(cricket=True, football=True, multi=True):
         run_football(R)
     if multi:
         run_multi(R)
+
+    # Outcome tracking — fetch results, score predictions, self-improve
+    print("\n" + "━" * 80)
+    print("  🔄 OUTCOME TRACKING & SELF-IMPROVEMENT")
+    print("━" * 80)
+    try:
+        tracker_db = OracleDB(str(OUTPUT_DIR / "oracle.db"))
+        tracking = run_outcome_tracking(tracker_db)
+        R["outcome_tracking"] = {
+            k: v for k, v in tracking.items() if k != "learning" or not isinstance(v, dict) or len(str(v)) < 5000
+        }
+        scored = tracking.get("scoring", {}).get("scored", 0)
+        R["_audit"]["D_tracking"] = (
+            f"✅ {tracking['live']} live | {tracking['scheduled']} sched | "
+            f"{tracking['finished']} finished | {scored} scored"
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"  ⚠️ Outcome tracking: {e}")
+        R["_audit"]["D_tracking"] = f"⚠️ {e}"
 
     elapsed = time.time() - t0
     R["metadata"] = {
