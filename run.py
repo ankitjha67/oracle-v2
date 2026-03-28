@@ -665,36 +665,39 @@ def run_cricket(R):
         elo_val = r.get("elo", {}).get("rating", 0)
         print(f"      {i + 1:>2}. {t:<25} {elo_val:.0f}")
 
-    # Upcoming cricket — check ESPN
-    print("\n  [6] Checking upcoming cricket...")
+    # Upcoming cricket — all formats (international + domestic T20 leagues)
+    print("\n  [6] Fetching LIVE cricket fixtures (all formats)...")
     try:
-        upcoming_cricket = []
-        for endpoint in ["cricket", "cricket/icc"]:
-            data = requests.get(
-                f"https://site.api.espn.com/apis/site/v2/sports/{endpoint}/scoreboard", timeout=10
-            ).json()
-            for ev in data.get("events", []):
-                status = ev.get("status", {}).get("type", {}).get("name", "")
-                if "SCHEDULED" in status.upper():
-                    comp = ev.get("competitions", [{}])[0]
-                    teams = comp.get("competitors", [])
-                    if len(teams) == 2:
-                        upcoming_cricket.append(
-                            {
-                                "match": f"{teams[0].get('team', {}).get('displayName', '?')} vs {teams[1].get('team', {}).get('displayName', '?')}",
-                                "date": ev.get("date", "")[:10],
-                                "series": ev.get("season", {}).get("name", ""),
-                            }
-                        )
+        from fixture_fetcher import fetch_upcoming_cricket
+
+        all_cricket = fetch_upcoming_cricket()
+        live = [m for m in all_cricket if m["status"] == "live"]
+        scheduled = [m for m in all_cricket if m["status"] == "scheduled"]
+        upcoming_cricket = live + scheduled
+
         if upcoming_cricket:
             R["cricket_upcoming"] = upcoming_cricket
-            R["_audit"]["A5_upcoming"] = f"✅ {len(upcoming_cricket)} upcoming cricket matches"
-            for m in upcoming_cricket[:5]:
-                print(f"      {m['date']} {m['match']} ({m['series']})")
+            n_leagues = len({m["league"] for m in upcoming_cricket})
+            R["_audit"]["A5_upcoming"] = f"✅ {len(upcoming_cricket)} cricket matches ({n_leagues} competitions)"
+            print(f"    ✅ {len(upcoming_cricket)} matches across {n_leagues} competitions")
+            # Group by league
+            by_league = {}
+            for m in upcoming_cricket:
+                by_league.setdefault(m["league"], []).append(m)
+            for league, ms in sorted(by_league.items()):
+                print(f"    {league}: {len(ms)} matches")
+                for m in ms[:3]:
+                    status_tag = "🔴 LIVE" if m["status"] == "live" else ""
+                    score = ""
+                    if m.get("score_a") and m.get("score_b"):
+                        score = f" ({m['score_a']} vs {m['score_b']})"
+                    detail = f" — {m['status_detail']}" if m.get("status_detail") else ""
+                    print(f"      {m['date']} {m['match']}{score}{detail} {status_tag}")
+                if len(ms) > 3:
+                    print(f"      ... +{len(ms) - 3} more")
         else:
-            print("      No international cricket scheduled on ESPN right now")
-            print("      🏏 IPL 2026 starts March 28 — first 20 matches released")
-            R["_audit"]["A5_upcoming"] = "✅ IPL 2026 starts Mar 28 (no live intl cricket)"
+            print("      No cricket matches found on ESPN")
+            R["_audit"]["A5_upcoming"] = "⚠️ No cricket matches found"
             R["cricket_upcoming"] = []
     except Exception as e:
         print(f"      ⚠️ ESPN cricket: {e}")

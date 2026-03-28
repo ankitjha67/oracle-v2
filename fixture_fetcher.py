@@ -229,6 +229,113 @@ def format_for_oracle(matches):
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# CRICKET FIXTURE FETCHER — All formats via ESPN
+# ═══════════════════════════════════════════════════════════════════════
+
+# ESPN league IDs for cricket — scoreboard endpoint
+CRICKET_LEAGUES = {
+    # Domestic T20 franchise leagues
+    8048: "IPL",
+    8044: "BBL",
+    8679: "PSL",
+    # International (ICC)
+    # These use the header API fallback since individual IDs are unreliable
+}
+
+# ESPN scoreboard header API returns ALL live/upcoming cricket in one call
+ESPN_CRICKET_HEADER = "https://site.web.api.espn.com/apis/v2/scoreboard/header?sport=cricket"
+
+
+def fetch_upcoming_cricket():
+    """Fetch all upcoming/live cricket matches across all formats.
+
+    Uses the ESPN scoreboard header API which returns every active cricket
+    league (international + domestic) in a single request.
+    """
+    matches = []
+    seen = set()
+
+    # Primary source: ESPN header API (returns all leagues at once)
+    data = _fetch(ESPN_CRICKET_HEADER, "espn_cricket_header", ttl=0.25)
+    if data:
+        for sport in data.get("sports", []):
+            for league in sport.get("leagues", []):
+                league_name = league.get("name", "Unknown")
+                league_id = league.get("id", "")
+                for ev in league.get("events", []):
+                    competitors = ev.get("competitors", [])
+                    if len(competitors) != 2:
+                        continue
+                    status_info = ev.get("fullStatus", {}).get("type", {})
+                    status_state = status_info.get("state", "").lower()
+                    status_desc = status_info.get("description", "").lower()
+                    is_scheduled = status_state == "pre" or "scheduled" in status_desc
+                    is_live = status_state == "in" or "live" in status_desc
+                    team_a = competitors[0].get("displayName", "?")
+                    team_b = competitors[1].get("displayName", "?")
+                    key = f"{team_a}_{team_b}_{ev.get('date', '')[:10]}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    score_a = competitors[0].get("score", "")
+                    score_b = competitors[1].get("score", "")
+                    m = {
+                        "match": f"{team_a} vs {team_b}",
+                        "team_a": team_a,
+                        "team_b": team_b,
+                        "date": ev.get("date", "")[:10],
+                        "time": ev.get("date", ""),
+                        "league": league_name,
+                        "league_id": league_id,
+                        "status": "scheduled" if is_scheduled else "live" if is_live else "finished",
+                        "status_detail": ev.get("summary", ""),
+                        "score_a": score_a if not is_scheduled else None,
+                        "score_b": score_b if not is_scheduled else None,
+                    }
+                    matches.append(m)
+
+    # Fallback: hit individual league scoreboards for key domestic T20 leagues
+    # (in case header API misses recently added leagues)
+    for league_id, league_name in CRICKET_LEAGUES.items():
+        url = f"https://site.api.espn.com/apis/site/v2/sports/cricket/{league_id}/scoreboard"
+        data = _fetch(url, f"espn_cricket_{league_id}", ttl=0.5)
+        if not data:
+            continue
+        for ev in data.get("events", []):
+            comp = ev.get("competitions", [{}])[0]
+            status = comp.get("status", {}).get("type", {}).get("name", "")
+            teams = comp.get("competitors", [])
+            if len(teams) != 2:
+                continue
+            team_a = teams[0].get("team", {}).get("displayName", "?")
+            team_b = teams[1].get("team", {}).get("displayName", "?")
+            key = f"{team_a}_{team_b}_{ev.get('date', '')[:10]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            is_scheduled = "SCHEDULED" in status.upper()
+            is_live = "PROGRESS" in status.upper()
+            m = {
+                "match": f"{team_a} vs {team_b}",
+                "team_a": team_a,
+                "team_b": team_b,
+                "date": ev.get("date", "")[:10],
+                "time": ev.get("date", ""),
+                "league": league_name,
+                "league_id": str(league_id),
+                "venue": comp.get("venue", {}).get("fullName", ""),
+                "status": "scheduled" if is_scheduled else "live" if is_live else "finished",
+                "status_detail": comp.get("status", {}).get("type", {}).get("detail", ""),
+                "score_a": teams[0].get("score") if not is_scheduled else None,
+                "score_b": teams[1].get("score") if not is_scheduled else None,
+            }
+            matches.append(m)
+
+    matches.sort(key=lambda x: (x.get("status") != "live", x.get("date", "")))
+    return matches
+
+
 def identify_ucl_two_legs(matches):
     """Identify UCL two-leg ties from fixture list."""
     ties = {}
