@@ -98,7 +98,7 @@ from analytics import AnalyticsEngine, MarketEfficiencyMonitor, RatingChangePoin
 from core import BiasAuditor, OracleDB, RatingEngine  # noqa: E402
 from cricsheet_pipeline import WC_SQUADS, build_player_database  # noqa: E402
 from engine import OracleV2  # noqa: E402
-from fixture_fetcher import fetch_and_format, identify_ucl_two_legs  # noqa: E402
+from fixture_fetcher import fetch_all_live_football, fetch_and_format, identify_ucl_two_legs  # noqa: E402
 from football_pipeline import (  # noqa: E402
     GAMBLING_DISCLAIMER,
     FootballElo,
@@ -784,7 +784,7 @@ def run_football(R):
     R["_audit"]["B4_roi"] = f"✅ ROI: {roi['roi_pct']}% ({roi['wins']}/{roi['total_bets']} wins)"
     print(f"  [10b] ROI backtest: {roi['roi_pct']}% ({roi['wins']}/{roi['total_bets']})")
 
-    # Live fixtures
+    # Live fixtures — top-5 leagues + UCL (for predictions with trained Elo)
     print("\n  [11] Fetching LIVE fixtures...")
     try:
         live, raw = fetch_and_format()
@@ -800,8 +800,63 @@ def run_football(R):
         raw = []
         R["fixtures_source"] = str(e)
 
+    # Also fetch ALL live football across every competition
+    print("\n  [12] Fetching ALL live football (all competitions)...")
+    try:
+        all_live = fetch_all_live_football()
+        live_now = [m for m in all_live if m["status"] == "live"]
+        sched_today = [m for m in all_live if m["status"] == "scheduled"]
+        finished_today = [m for m in all_live if m["status"] == "finished"]
+        total_active = len(live_now) + len(sched_today)
+        if live_now or sched_today:
+            n_leagues = len({m["league"] for m in live_now + sched_today})
+            print(f"    ✅ {len(live_now)} live + {len(sched_today)} scheduled across {n_leagues} competitions")
+            if live_now:
+                print(f"\n    🔴 LIVE NOW ({len(live_now)}):")
+                by_league = {}
+                for m in live_now:
+                    by_league.setdefault(m["league"], []).append(m)
+                for lg, ms in sorted(by_league.items()):
+                    print(f"      {lg}:")
+                    for m in ms:
+                        score = f"{m.get('score_home', '?')}-{m.get('score_away', '?')}"
+                        detail = f" ({m['status_detail']})" if m.get("status_detail") else ""
+                        print(f"        {m['home']:<25} {score:>5}  {m['away']:<25}{detail}")
+            if sched_today:
+                print(f"\n    📅 UPCOMING TODAY ({len(sched_today)}):")
+                by_league = {}
+                for m in sched_today:
+                    by_league.setdefault(m["league"], []).append(m)
+                for lg, ms in sorted(by_league.items()):
+                    print(f"      {lg}:")
+                    for m in ms[:5]:
+                        print(f"        {m['home']:<25}  vs  {m['away']}")
+                    if len(ms) > 5:
+                        print(f"        ... +{len(ms) - 5} more")
+            if finished_today:
+                print(f"\n    ✅ FINISHED TODAY ({len(finished_today)}):")
+                by_league = {}
+                for m in finished_today:
+                    by_league.setdefault(m["league"], []).append(m)
+                for lg, ms in sorted(by_league.items()):
+                    print(f"      {lg}:")
+                    for m in ms[:5]:
+                        score = f"{m.get('score_home', '?')}-{m.get('score_away', '?')}"
+                        detail = f" ({m['status_detail']})" if m.get("status_detail") else ""
+                        print(f"        {m['home']:<25} {score:>5}  {m['away']:<25}{detail}")
+                    if len(ms) > 5:
+                        print(f"        ... +{len(ms) - 5} more")
+            R["football_all_live"] = all_live
+            R["_audit"]["B5b_live"] = f"✅ {len(live_now)} live + {len(sched_today)} sched + {len(finished_today)} FT"
+        else:
+            print("    No live or scheduled football matches right now")
+            R["_audit"]["B5b_live"] = "⚠️ No live football"
+    except Exception as e:
+        print(f"    ⚠️ Live fetch: {e}")
+        R["_audit"]["B5b_live"] = f"⚠️ {e}"
+
     if not upcoming:
-        print("    No upcoming matches")
+        print("\n    No upcoming top-league matches for predictions")
         R["football_predictions"] = []
         R["_audit"]["B5_preds"] = "⚠️ No fixtures"
         return

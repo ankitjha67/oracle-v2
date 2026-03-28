@@ -212,6 +212,64 @@ def fetch_upcoming_football(leagues=None, days_ahead=14):
     return all_matches
 
 
+# ESPN scoreboard header API returns ALL live/upcoming football in one call
+ESPN_FOOTBALL_HEADER = "https://site.web.api.espn.com/apis/v2/scoreboard/header?sport=soccer"
+
+
+def fetch_all_live_football():
+    """Fetch all live and scheduled football matches across ALL competitions.
+
+    Uses the ESPN scoreboard header API which returns every active football
+    league (top-5, internationals, women's, lower divisions, etc.) in one request.
+    Returns matches sorted with live games first.
+    """
+    matches = []
+    seen = set()
+
+    data = _fetch(ESPN_FOOTBALL_HEADER, "espn_football_header", ttl=0.05)
+    if not data:
+        return matches
+
+    for sport in data.get("sports", []):
+        for league in sport.get("leagues", []):
+            league_name = league.get("name", "Unknown")
+            league_id = league.get("id", "")
+            for ev in league.get("events", []):
+                competitors = ev.get("competitors", [])
+                if len(competitors) != 2:
+                    continue
+                status_info = ev.get("fullStatus", {}).get("type", {})
+                status_state = status_info.get("state", "").lower()
+                status_desc = status_info.get("description", "").lower()
+                is_scheduled = status_state == "pre"
+                is_live = status_state == "in"
+                is_finished = status_state == "post"
+                home = competitors[0].get("displayName", "?")
+                away = competitors[1].get("displayName", "?")
+                key = f"{home}_{away}_{ev.get('date', '')[:10]}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                score_h = competitors[0].get("score", "")
+                score_a = competitors[1].get("score", "")
+                m = {
+                    "home": home,
+                    "away": away,
+                    "league": league_name,
+                    "league_id": league_id,
+                    "date": ev.get("date", "")[:10],
+                    "time": ev.get("date", ""),
+                    "status": "live" if is_live else "scheduled" if is_scheduled else "finished",
+                    "status_detail": ev.get("summary", ""),
+                    "score_home": score_h if not is_scheduled else None,
+                    "score_away": score_a if not is_scheduled else None,
+                }
+                matches.append(m)
+
+    matches.sort(key=lambda x: (x["status"] != "live", x["status"] != "scheduled", x.get("date", "")))
+    return matches
+
+
 def format_for_oracle(matches):
     """Map ESPN names to football-data.co.uk names for Elo lookup."""
     out = []
