@@ -1,5 +1,6 @@
 # ── Data (auto-downloaded on first run) ──
 cricsheet_data/
+cricsheet_*/
 football_data/
 .cache/
 
