@@ -161,6 +161,24 @@ def _names_match(a, b):
     return bool(na in nb or nb in na)
 
 
+def _date_diff_days(pred_date, result_date):
+    """Days between prediction and result dates, or None if either is missing.
+
+    Critical for sports like MLB where the same teams play a multi-game
+    series on consecutive days — without date checks, a prediction for
+    tomorrow's game gets scored against today's result.
+    """
+    pd, rd = str(pred_date or "")[:10], str(result_date or "")[:10]
+    if not pd or not rd:
+        return None
+    try:
+        d1 = datetime.strptime(pd, "%Y-%m-%d")
+        d2 = datetime.strptime(rd, "%Y-%m-%d")
+        return abs((d1 - d2).days)
+    except ValueError:
+        return None
+
+
 def score_predictions(db, results):
     """Score unscored predictions against actual results.
 
@@ -190,50 +208,66 @@ def score_predictions(db, results):
         pred_a = pred["team_a"]
         pred_b = pred["team_b"]
         pred_winner = pred["predicted_winner"]
+        pred_date = pred.get("match_date", "")
 
-        # Find matching result
+        # Find the matching result — among name matches, take the one with
+        # the closest date (max ±1 day) so consecutive-day series games
+        # aren't scored against the wrong fixture.
+        best_result = None
+        best_diff = None
         for result in finished:
             if (_names_match(pred_a, result["team_a"]) and _names_match(pred_b, result["team_b"])) or (
                 _names_match(pred_a, result["team_b"]) and _names_match(pred_b, result["team_a"])
             ):
-                actual_winner = result["winner"]
-                is_correct = 1 if _names_match(pred_winner, actual_winner) else 0
-                # Handle draw predictions
-                if pred_winner.upper() == "DRAW" and not result["winner"]:
-                    is_correct = 1
+                diff = _date_diff_days(pred_date, result.get("date", ""))
+                if diff is not None and diff > 1:
+                    continue
+                rank = 2 if diff is None else diff  # Prefer exact > ±1 > undated
+                if best_diff is None or rank < best_diff:
+                    best_result = result
+                    best_diff = rank
+                    if rank == 0:
+                        break
 
+        if best_result is not None:
+            result = best_result
+            actual_winner = result["winner"]
+            is_correct = 1 if _names_match(pred_winner, actual_winner) else 0
+            # Handle draw predictions
+            if pred_winner.upper() == "DRAW" and not result["winner"]:
+                is_correct = 1
+
+            conn.execute(
+                "UPDATE predictions SET actual_winner=?, is_correct=? WHERE id=?",
+                (actual_winner, is_correct, pred["id"]),
+            )
+
+            # Also update the match record if it exists
+            match_id = pred.get("match_id", "")
+            if match_id:
                 conn.execute(
-                    "UPDATE predictions SET actual_winner=?, is_correct=? WHERE id=?",
-                    (actual_winner, is_correct, pred["id"]),
+                    "UPDATE matches SET winner=?, score_a=?, score_b=? WHERE id=?",
+                    (actual_winner, result.get("score_a", ""), result.get("score_b", ""), match_id),
                 )
 
-                # Also update the match record if it exists
-                match_id = pred.get("match_id", "")
-                if match_id:
-                    conn.execute(
-                        "UPDATE matches SET winner=?, score_a=?, score_b=? WHERE id=?",
-                        (actual_winner, result.get("score_a", ""), result.get("score_b", ""), match_id),
-                    )
+            scored_count += 1
+            if is_correct:
+                correct_count += 1
+            else:
+                wrong_count += 1
 
-                scored_count += 1
-                if is_correct:
-                    correct_count += 1
-                else:
-                    wrong_count += 1
-
-                details.append(
-                    {
-                        "match": f"{pred_a} vs {pred_b}",
-                        "predicted": pred_winner,
-                        "actual": actual_winner,
-                        "correct": bool(is_correct),
-                        "prob_a": pred.get("prob_a", 0),
-                        "prob_b": pred.get("prob_b", 0),
-                        "confidence": pred.get("confidence", ""),
-                        "sport": pred.get("sport", ""),
-                    }
-                )
-                break
+            details.append(
+                {
+                    "match": f"{pred_a} vs {pred_b}",
+                    "predicted": pred_winner,
+                    "actual": actual_winner,
+                    "correct": bool(is_correct),
+                    "prob_a": pred.get("prob_a", 0),
+                    "prob_b": pred.get("prob_b", 0),
+                    "confidence": pred.get("confidence", ""),
+                    "sport": pred.get("sport", ""),
+                }
+            )
 
     conn.commit()
 
@@ -297,6 +331,8 @@ def store_prediction(db, pred, sport=""):
     confidence = oracle.get("confidence", "")
     model_votes = oracle.get("model_votes", {})
 
+    match_date = str(pred.get("date", pred.get("match_date", "")))[:10]
+
     pred_record = {
         "sport": sport or pred.get("sport", pred.get("league", "")),
         "team_a": team_a,
@@ -307,6 +343,7 @@ def store_prediction(db, pred, sport=""):
         "predicted_winner": predicted_winner,
         "confidence": confidence,
         "model_votes": model_votes,
+        "match_date": match_date,
     }
 
     return db.insert_prediction(pred_record)

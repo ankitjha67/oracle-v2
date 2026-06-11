@@ -566,6 +566,28 @@ class SportMLEngine:
         if espn_path:
             self.roster_tracker = RosterTracker(espn_path)
 
+        # Self-improvement weights from outcome tracking (lazy-loaded)
+        self._dampen: float | None = None
+
+    def _learning_dampen(self) -> float:
+        """Confidence dampening factor learned from past scored predictions.
+
+        outcome_tracker.learn_from_mistakes() writes per-sport weights to
+        oracle_learning.json; sports with sub-55% measured accuracy get
+        their probabilities shrunk toward 50%.
+        """
+        if self._dampen is None:
+            self._dampen = 1.0
+            try:
+                from outcome_tracker import load_learning
+
+                weights = load_learning().get("sport_weights", {})
+                w = weights.get(self.sport_key, {})
+                self._dampen = float(w.get("confidence_dampen", 1.0))
+            except Exception:
+                pass
+        return self._dampen
+
     def _elo_update(self, winner: str, loser: str, home_team: str | None, margin: float):
         """Update Elo ratings after a match."""
         ha = self.home_adv if home_team == winner else (-self.home_adv if home_team == loser else 0)
@@ -793,7 +815,9 @@ class SportMLEngine:
         for name, model in self.models.items():
             try:
                 p = model.predict_proba(features_scaled)[0]
-                prob_a = p[1] if len(p) > 1 else p[0]
+                prob_a = float(p[1] if len(p) > 1 else p[0])
+                if not np.isfinite(prob_a):
+                    continue
                 probs.append(prob_a)
                 model_votes[name] = round(prob_a, 3)
             except Exception:
@@ -805,9 +829,10 @@ class SportMLEngine:
             meta_input = np.nan_to_num(meta_input, nan=0.5, posinf=0.5, neginf=0.5)
             try:
                 meta_p = self.meta_learner.predict_proba(meta_input)[0]
-                meta_prob = meta_p[1] if len(meta_p) > 1 else meta_p[0]
-                probs.append(meta_prob)
-                model_votes["StackingMeta"] = round(meta_prob, 3)
+                meta_prob = float(meta_p[1] if len(meta_p) > 1 else meta_p[0])
+                if np.isfinite(meta_prob):
+                    probs.append(meta_prob)
+                    model_votes["StackingMeta"] = round(meta_prob, 3)
             except Exception:
                 pass
 
@@ -819,8 +844,22 @@ class SportMLEngine:
         ml_prob = float(np.mean(probs))
         ml_std = float(np.std(probs))
 
-        # Blend ML (70%) with Elo (30%)
-        blended = 0.7 * ml_prob + 0.3 * elo_prob
+        # Adaptive blend: ML features need match history to be informative.
+        # With no recent games for either side they collapse to defaults, so
+        # lean on Elo (which carries record-based priors) instead.
+        n_a = len(self.stats[team_a].results) if team_a in self.stats else 0
+        n_b = len(self.stats[team_b].results) if team_b in self.stats else 0
+        ml_weight = 0.7 if min(n_a, n_b) >= 3 else 0.3
+        blended = ml_weight * ml_prob + (1 - ml_weight) * elo_prob
+        if not math.isfinite(blended):
+            blended = elo_prob
+
+        # Self-improvement: shrink toward 50% if outcome tracking found this
+        # sport's model to be overconfident (weights from oracle_learning.json)
+        dampen = self._learning_dampen()
+        if dampen < 1.0:
+            blended = 0.5 + (blended - 0.5) * dampen
+
         pa = round(blended * 100, 1)
         pb = round((1 - blended) * 100, 1)
 
@@ -830,6 +869,9 @@ class SportMLEngine:
         adjusted_diff = max(diff - agreement_penalty, 0)
         conf = "HIGH" if adjusted_diff > 15 else "MODERATE" if adjusted_diff > 7 else "LOW"
 
+        extra = {}
+        if dampen < 1.0:
+            extra["learning_dampen"] = round(dampen, 3)
         result = self._format_prediction(
             team_a,
             team_b,
@@ -841,6 +883,7 @@ class SportMLEngine:
             ml_prob=round(ml_prob, 3),
             elo_prob=round(elo_prob, 3),
             model_std=round(ml_std, 3),
+            **extra,
         )
 
         # Attach roster change alerts

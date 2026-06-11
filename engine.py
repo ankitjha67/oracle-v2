@@ -1139,6 +1139,7 @@ class OracleV2:
                 "confidence": confidence,
                 "model_votes": model_votes,
                 "features": {fn: float(fv) for fn, fv in zip(FEATURE_NAMES, features)},
+                "match_date": str(match.get("date", ""))[:10],
             }
         )
 

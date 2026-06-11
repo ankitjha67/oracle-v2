@@ -74,8 +74,8 @@ class SportElo:
             if total == 0:
                 return
             win_rate = wins / total
-            # Map win rate to Elo: 50% → 1500, 90% → 1650, 30% → 1350
-            prior = 1500 + (win_rate - 0.5) * 300
+            # Map win rate to Elo: 50% → 1500, 90% → 1700, 30% → 1400
+            prior = 1500 + (win_rate - 0.5) * 500
             # Experience bonus: more fights = more reliable rating
             exp_bonus = min(total * 1.5, 50)  # Cap at +50
             self.ratings[name] = prior + exp_bonus
@@ -267,6 +267,27 @@ def build_ufc(days_back=60, days_ahead=14):
     engine = SportMLEngine("UFC", K=40, home_adv=0)
     elo_legacy = SportElo(1500, 40, 0)  # for record-based priors
 
+    # Set priors from career records for upcoming fighters FIRST, so recent
+    # results adjust on top of them. Most fighters on an upcoming card
+    # haven't fought within the lookback window, so without priors every
+    # matchup would collapse to identical default features.
+    for d in range(0, days_ahead + 1):
+        dt_str = (datetime.now() + timedelta(days=d)).strftime("%Y%m%d")
+        data_up = _fetch(f"{ESPN}/mma/ufc/scoreboard?dates={dt_str}", f"rec_ufc_{dt_str}", 1)
+        if not data_up:
+            continue
+        for ev in data_up.get("events", []):
+            for fight in _parse_fight_event(ev):
+                for fighter, record in (
+                    (fight["fighter_a"], fight["record_a"]),
+                    (fight["fighter_b"], fight["record_b"]),
+                ):
+                    if fighter == "?" or not record:
+                        continue
+                    elo_legacy.set_prior_from_record(fighter, record)
+                    if fighter in elo_legacy.ratings:
+                        engine.elo[fighter] = elo_legacy.ratings[fighter]
+
     # Build from recent fight results (chronological)
     results = []
     for d in range(days_back, -1, -1):
@@ -286,19 +307,6 @@ def build_ufc(days_back=60, days_ahead=14):
                         engine.add_result(fight["fighter_a"], fight["fighter_b"], l_score, w_score, None, fight["date"])
                     elo_legacy.update(fight["winner"], loser)
                     results.append(fight)
-
-    # Set priors from records for upcoming fighters
-    for d in range(0, days_ahead + 1):
-        dt_str = (datetime.now() + timedelta(days=d)).strftime("%Y%m%d")
-        data_up = _fetch(f"{ESPN}/mma/ufc/scoreboard?dates={dt_str}", f"rec_ufc_{dt_str}", 1)
-        if not data_up:
-            continue
-        for ev in data_up.get("events", []):
-            for fight in _parse_fight_event(ev):
-                if fight["fighter_a"] != "?" and fight["record_a"]:
-                    elo_legacy.set_prior_from_record(fight["fighter_a"], fight["record_a"])
-                if fight["fighter_b"] != "?" and fight["record_b"]:
-                    elo_legacy.set_prior_from_record(fight["fighter_b"], fight["record_b"])
 
     # Train ML models
     train_info = engine.train()

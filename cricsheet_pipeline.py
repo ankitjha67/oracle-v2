@@ -383,12 +383,79 @@ def parse_info_file(filepath: str) -> dict:
     return info
 
 
+# CricSheet csv2 column layouts. Some zips ship ball-by-ball files WITHOUT a
+# header row — the standard documented layout has 22 columns, and an extended
+# variant observed in 2026 downloads has 27 (extra over_ball, non_boundary,
+# and fielder columns). Mapped empirically against known matches.
+_CSV2_COLS_22 = [
+    "match_id",
+    "season",
+    "start_date",
+    "venue",
+    "innings",
+    "ball",
+    "batting_team",
+    "bowling_team",
+    "striker",
+    "non_striker",
+    "bowler",
+    "runs_off_bat",
+    "extras",
+    "wides",
+    "noballs",
+    "byes",
+    "legbyes",
+    "penalty",
+    "wicket_type",
+    "player_dismissed",
+    "other_wicket_type",
+    "other_player_dismissed",
+]
+_CSV2_COLS_27 = [
+    "match_id",
+    "season",
+    "start_date",
+    "venue",
+    "innings",
+    "ball",
+    "over_ball",
+    "batting_team",
+    "bowling_team",
+    "striker",
+    "non_striker",
+    "bowler",
+    "runs_off_bat",
+    "extras",
+    "wides",
+    "noballs",
+    "byes",
+    "legbyes",
+    "penalty",
+    "non_boundary",
+    "wicket_type",
+    "player_dismissed",
+    "other_wicket_type",
+    "other_player_dismissed",
+    "fielder1",
+    "fielder2",
+    "unused",
+]
+
+
 def parse_ball_data(filepath: str) -> list[dict]:
-    """Parse ball-by-ball CSV."""
+    """Parse ball-by-ball CSV, handling both headered and headerless files."""
     balls = []
     try:
         with open(filepath, encoding="utf-8", errors="replace") as f:
-            reader = csv.DictReader(f)
+            first_line = f.readline()
+            f.seek(0)
+            if "striker" in first_line:
+                reader = csv.DictReader(f)
+            else:
+                # Headerless file — pick column layout by field count
+                n_cols = first_line.count(",") + 1
+                fieldnames = _CSV2_COLS_27 if n_cols >= 25 else _CSV2_COLS_22
+                reader = csv.DictReader(f, fieldnames=fieldnames)
             for row in reader:
                 try:
                     balls.append(

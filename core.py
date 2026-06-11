@@ -36,10 +36,11 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 class OracleDB:
     """Persistent storage for matches, predictions, ratings, odds, features."""
 
-    _local = threading.local()
-
     def __init__(self, path: str = str(DB_PATH)):
         self.path = path
+        # Per-instance thread-local: a class-level local would bind every
+        # instance on the thread to whichever DB file was opened first.
+        self._local = threading.local()
         self._init_schema()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -107,6 +108,7 @@ class OracleDB:
                 features_json TEXT DEFAULT '{}',
                 odds_json TEXT DEFAULT '{}',
                 is_correct INTEGER DEFAULT -1,
+                match_date TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (match_id) REFERENCES matches(id)
             );
@@ -185,6 +187,14 @@ class OracleDB:
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            self._migrate_schema(conn)
+
+    @staticmethod
+    def _migrate_schema(conn):
+        """Add columns introduced after a table already exists in older DBs."""
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(predictions)")}
+        if "match_date" not in existing:
+            conn.execute("ALTER TABLE predictions ADD COLUMN match_date TEXT DEFAULT ''")
 
     # ── Match CRUD ──
     def insert_match(self, match: dict) -> str:
@@ -301,18 +311,28 @@ class OracleDB:
 
     # ── Predictions ──
     def insert_prediction(self, pred: dict) -> str:
+        match_date = pred.get("match_date", "")
+        # Deterministic ID per fixture so re-running the pipeline updates the
+        # existing prediction instead of inserting a duplicate row.
         pid = (
             pred.get("id")
-            or hashlib.md5(f"{pred['team_a']}_{pred['team_b']}_{datetime.now().isoformat()}".encode()).hexdigest()[:16]
+            or hashlib.md5(
+                f"{pred.get('sport', '')}_{pred['team_a']}_{pred['team_b']}_{match_date}".encode()
+            ).hexdigest()[:16]
         )
         with self.transaction() as conn:
+            # Never overwrite a prediction that has already been scored —
+            # the pre-match probabilities must stay frozen for evaluation.
+            existing = conn.execute("SELECT is_correct FROM predictions WHERE id=?", (pid,)).fetchone()
+            if existing and existing["is_correct"] >= 0:
+                return pid
             conn.execute(
                 """
                 INSERT OR REPLACE INTO predictions
                 (id,match_id,sport,team_a,team_b,prob_a,prob_b,prob_draw,
                  predicted_winner,actual_winner,confidence,model_votes_json,
-                 features_json,odds_json,is_correct)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 features_json,odds_json,is_correct,match_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
                 (
                     pid,
@@ -330,6 +350,7 @@ class OracleDB:
                     json.dumps(pred.get("features", {}), default=str),
                     json.dumps(pred.get("odds", {}), default=str),
                     pred.get("is_correct", -1),
+                    match_date,
                 ),
             )
         return pid

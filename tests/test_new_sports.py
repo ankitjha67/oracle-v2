@@ -171,3 +171,47 @@ class TestDomesticCricketLeagues:
             players, n = build_player_database(tmpdir, min_year=2025, target_teams=None)
             assert isinstance(players, dict)
             assert n == 0
+
+
+class TestBallDataParsing:
+    """parse_ball_data must handle headered AND headerless CricSheet CSVs."""
+
+    HEADERED = (
+        "match_id,season,start_date,venue,innings,ball,batting_team,bowling_team,"
+        "striker,non_striker,bowler,runs_off_bat,extras,wides,noballs,byes,legbyes,"
+        "penalty,wicket_type,player_dismissed,other_wicket_type,other_player_dismissed\n"
+        "1,2026,2026-01-01,MCG,1,0.1,Australia,India,DA Warner,TM Head,JJ Bumrah,4,0,,,,,,,,,\n"
+        "1,2026,2026-01-01,MCG,1,0.2,Australia,India,DA Warner,TM Head,JJ Bumrah,0,1,1,,,,,,,,\n"
+    )
+    # 27-column extended headerless variant (observed in 2026 cricsheet zips)
+    HEADERLESS_27 = (
+        "1,2026,2026-01-01,MCG,1,0.1,0.1,Australia,India,DA Warner,TM Head,JJ Bumrah,4,0,,,,,,,,,,,,,\n"
+        "1,2026,2026-01-01,MCG,1,0.2,0.2,Australia,India,DA Warner,TM Head,JJ Bumrah,0,1,1,,,,,,,,,,,,\n"
+        "1,2026,2026-01-01,MCG,1,0.3,0.3,Australia,India,DA Warner,TM Head,JJ Bumrah,0,0,,,,,,,caught,DA Warner,,,V Kohli,,\n"
+    )
+
+    def _parse(self, content, tmp_path):
+        from cricsheet_pipeline import parse_ball_data
+
+        fp = tmp_path / "match.csv"
+        fp.write_text(content)
+        return parse_ball_data(str(fp))
+
+    def test_headered_csv(self, tmp_path):
+        balls = self._parse(self.HEADERED, tmp_path)
+        assert len(balls) == 2
+        assert balls[0]["striker"] == "DA Warner"
+        assert balls[0]["bowler"] == "JJ Bumrah"
+        assert balls[0]["runs"] == 4
+        assert balls[1]["wides"] == 1
+
+    def test_headerless_27_column_csv(self, tmp_path):
+        balls = self._parse(self.HEADERLESS_27, tmp_path)
+        assert len(balls) == 3
+        assert balls[0]["striker"] == "DA Warner"
+        assert balls[0]["bowler"] == "JJ Bumrah"
+        assert balls[0]["batting_team"] == "Australia"
+        assert balls[0]["runs"] == 4
+        assert balls[1]["wides"] == 1
+        assert balls[2]["wicket_type"] == "caught"
+        assert balls[2]["dismissed"] == "DA Warner"

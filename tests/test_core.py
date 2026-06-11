@@ -32,7 +32,7 @@ class TestOracleDB:
         assert matches[0]["team_a"] == "India"
 
     def test_head_to_head(self, tmp_db):
-        for winner in ["India", "India", "England"]:
+        for i, winner in enumerate(["India", "India", "England"]):
             loser = "England" if winner == "India" else "India"
             tmp_db.insert_match(
                 {
@@ -40,7 +40,7 @@ class TestOracleDB:
                     "team_a": winner,
                     "team_b": loser,
                     "winner": winner,
-                    "date": "2026-01-01",
+                    "date": f"2026-01-0{i + 1}",
                 }
             )
         h2h = tmp_db.get_h2h("India", "England", "cricket")
