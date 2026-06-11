@@ -15,6 +15,7 @@ backtest_results.json
 monte_carlo.json
 complete_player_database.json
 aggregated_match_data.json
+oracle_learning.json
 oracle.db
 
 # ── Environment / Secrets ──
