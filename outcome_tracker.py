@@ -10,7 +10,6 @@ Flow:
   3. learn_from_mistakes() — Analyze misses, generate recalibration weights
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -140,6 +139,7 @@ def fetch_all_live_and_results():
 def _normalize_name(name):
     """Normalize team names for fuzzy matching."""
     import re
+
     name = name.strip().lower()
     # Remove common suffixes/prefixes
     for suffix in [" fc", " cf", " sc", " afc", " united", " city"]:
@@ -158,9 +158,7 @@ def _names_match(a, b):
     if na == nb:
         return True
     # Check if one contains the other (e.g. "Arsenal" matches "Arsenal FC")
-    if na in nb or nb in na:
-        return True
-    return False
+    return bool(na in nb or nb in na)
 
 
 def score_predictions(db, results):
@@ -176,9 +174,7 @@ def score_predictions(db, results):
     conn = db._get_conn()
 
     # Get all unscored predictions
-    unscored = conn.execute(
-        "SELECT * FROM predictions WHERE is_correct = -1"
-    ).fetchall()
+    unscored = conn.execute("SELECT * FROM predictions WHERE is_correct = -1").fetchall()
     if not unscored:
         return {"scored": 0, "already_scored": 0, "message": "No unscored predictions"}
 
@@ -197,8 +193,9 @@ def score_predictions(db, results):
 
         # Find matching result
         for result in finished:
-            if (_names_match(pred_a, result["team_a"]) and _names_match(pred_b, result["team_b"])) or \
-               (_names_match(pred_a, result["team_b"]) and _names_match(pred_b, result["team_a"])):
+            if (_names_match(pred_a, result["team_a"]) and _names_match(pred_b, result["team_b"])) or (
+                _names_match(pred_a, result["team_b"]) and _names_match(pred_b, result["team_a"])
+            ):
                 actual_winner = result["winner"]
                 is_correct = 1 if _names_match(pred_winner, actual_winner) else 0
                 # Handle draw predictions
@@ -224,16 +221,18 @@ def score_predictions(db, results):
                 else:
                     wrong_count += 1
 
-                details.append({
-                    "match": f"{pred_a} vs {pred_b}",
-                    "predicted": pred_winner,
-                    "actual": actual_winner,
-                    "correct": bool(is_correct),
-                    "prob_a": pred.get("prob_a", 0),
-                    "prob_b": pred.get("prob_b", 0),
-                    "confidence": pred.get("confidence", ""),
-                    "sport": pred.get("sport", ""),
-                })
+                details.append(
+                    {
+                        "match": f"{pred_a} vs {pred_b}",
+                        "predicted": pred_winner,
+                        "actual": actual_winner,
+                        "correct": bool(is_correct),
+                        "prob_a": pred.get("prob_a", 0),
+                        "prob_b": pred.get("prob_b", 0),
+                        "confidence": pred.get("confidence", ""),
+                        "sport": pred.get("sport", ""),
+                    }
+                )
                 break
 
     conn.commit()
@@ -279,9 +278,21 @@ def store_prediction(db, pred, sport=""):
         return None
 
     oracle = pred.get("oracle_prediction", pred.get("prediction", {}))
-    prob_a = oracle.get("home_pct", oracle.get("prob_a", 50)) / 100 if oracle.get("home_pct", oracle.get("prob_a", 0)) > 1 else oracle.get("prob_a", 0.5)
-    prob_b = oracle.get("away_pct", oracle.get("prob_b", 50)) / 100 if oracle.get("away_pct", oracle.get("prob_b", 0)) > 1 else oracle.get("prob_b", 0.5)
-    prob_draw = oracle.get("draw_pct", oracle.get("prob_draw", 0)) / 100 if oracle.get("draw_pct", oracle.get("prob_draw", 0)) > 1 else oracle.get("prob_draw", 0)
+    prob_a = (
+        oracle.get("home_pct", oracle.get("prob_a", 50)) / 100
+        if oracle.get("home_pct", oracle.get("prob_a", 0)) > 1
+        else oracle.get("prob_a", 0.5)
+    )
+    prob_b = (
+        oracle.get("away_pct", oracle.get("prob_b", 50)) / 100
+        if oracle.get("away_pct", oracle.get("prob_b", 0)) > 1
+        else oracle.get("prob_b", 0.5)
+    )
+    prob_draw = (
+        oracle.get("draw_pct", oracle.get("prob_draw", 0)) / 100
+        if oracle.get("draw_pct", oracle.get("prob_draw", 0)) > 1
+        else oracle.get("prob_draw", 0)
+    )
     predicted_winner = oracle.get("predicted_result", oracle.get("winner", ""))
     confidence = oracle.get("confidence", "")
     model_votes = oracle.get("model_votes", {})
@@ -320,9 +331,7 @@ def learn_from_mistakes(db):
     conn = db._get_conn()
 
     # Get all scored predictions
-    rows = conn.execute(
-        "SELECT * FROM predictions WHERE is_correct >= 0 ORDER BY created_at DESC"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM predictions WHERE is_correct >= 0 ORDER BY created_at DESC").fetchall()
     if not rows:
         return {"message": "No scored predictions to learn from", "n": 0}
 
@@ -353,24 +362,28 @@ def learn_from_mistakes(db):
             s["wrong"] += 1
             if conf == "HIGH":
                 s["high_conf_wrong"] += 1
-                overconfident_misses.append({
-                    "match": f"{p['team_a']} vs {p['team_b']}",
-                    "predicted": p["predicted_winner"],
-                    "actual": p.get("actual_winner", "?"),
-                    "prob_a": p.get("prob_a", 0),
-                    "sport": sport,
-                })
+                overconfident_misses.append(
+                    {
+                        "match": f"{p['team_a']} vs {p['team_b']}",
+                        "predicted": p["predicted_winner"],
+                        "actual": p.get("actual_winner", "?"),
+                        "prob_a": p.get("prob_a", 0),
+                        "sport": sport,
+                    }
+                )
 
             # Check if we picked a strong favorite that lost
             max_prob = max(p.get("prob_a", 0), p.get("prob_b", 0))
             if max_prob > 0.65:
-                upset_misses.append({
-                    "match": f"{p['team_a']} vs {p['team_b']}",
-                    "predicted": p["predicted_winner"],
-                    "actual": p.get("actual_winner", "?"),
-                    "max_prob": round(max_prob, 3),
-                    "sport": sport,
-                })
+                upset_misses.append(
+                    {
+                        "match": f"{p['team_a']} vs {p['team_b']}",
+                        "predicted": p["predicted_winner"],
+                        "actual": p.get("actual_winner", "?"),
+                        "max_prob": round(max_prob, 3),
+                        "sport": sport,
+                    }
+                )
 
     # Generate recalibration weights
     sport_weights = {}
@@ -473,7 +486,7 @@ def run_outcome_tracking(db):
         for m in live:
             by_sport[m["sport"]].append(m)
         print(f"\n    🔴 LIVE NOW ({len(live)}):")
-        for sport, ms in sorted(by_sport.items()):
+        for _sport, ms in sorted(by_sport.items()):
             for m in ms[:5]:
                 score = f"{m.get('score_a', '?')}-{m.get('score_b', '?')}"
                 detail = f" ({m['status_detail']})" if m.get("status_detail") else ""
@@ -487,7 +500,7 @@ def run_outcome_tracking(db):
         for m in scheduled:
             by_sport[m["sport"]].append(m)
         print(f"\n    📅 UPCOMING ({len(scheduled)}):")
-        for sport, ms in sorted(by_sport.items()):
+        for _sport, ms in sorted(by_sport.items()):
             for m in ms[:3]:
                 print(f"      [{m['league']:30s}] {m['team_a']:22s}  vs  {m['team_b']}")
             if len(ms) > 3:
@@ -497,9 +510,11 @@ def run_outcome_tracking(db):
     print("\n  [OT] Scoring predictions against outcomes...")
     score_result = score_predictions(db, all_matches)
     if score_result["scored"] > 0:
-        print(f"    ✅ Scored {score_result['scored']} predictions: "
-              f"{score_result['correct']} correct, {score_result['wrong']} wrong "
-              f"({score_result['accuracy']:.1%})")
+        print(
+            f"    ✅ Scored {score_result['scored']} predictions: "
+            f"{score_result['correct']} correct, {score_result['wrong']} wrong "
+            f"({score_result['accuracy']:.1%})"
+        )
         # Show details
         for d in score_result["details"][:10]:
             icon = "✅" if d["correct"] else "❌"
@@ -514,8 +529,10 @@ def run_outcome_tracking(db):
     print("\n  [OT] Analyzing prediction performance...")
     learning = learn_from_mistakes(db)
     if learning.get("total_scored", 0) > 0:
-        print(f"    📊 Overall accuracy: {learning['overall_accuracy']:.1%} "
-              f"({learning['total_scored']} scored predictions)")
+        print(
+            f"    📊 Overall accuracy: {learning['overall_accuracy']:.1%} "
+            f"({learning['total_scored']} scored predictions)"
+        )
         if learning.get("sport_weights"):
             print("    Per-sport performance:")
             for sport, w in sorted(learning["sport_weights"].items()):

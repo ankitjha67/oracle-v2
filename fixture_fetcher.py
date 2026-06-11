@@ -240,10 +240,9 @@ def fetch_all_live_football():
                     continue
                 status_info = ev.get("fullStatus", {}).get("type", {})
                 status_state = status_info.get("state", "").lower()
-                status_desc = status_info.get("description", "").lower()
+                status_info.get("description", "").lower()
                 is_scheduled = status_state == "pre"
                 is_live = status_state == "in"
-                is_finished = status_state == "post"
                 home = competitors[0].get("displayName", "?")
                 away = competitors[1].get("displayName", "?")
                 key = f"{home}_{away}_{ev.get('date', '')[:10]}"

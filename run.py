@@ -808,7 +808,7 @@ def run_football(R):
         live_now = [m for m in all_live if m["status"] == "live"]
         sched_today = [m for m in all_live if m["status"] == "scheduled"]
         finished_today = [m for m in all_live if m["status"] == "finished"]
-        total_active = len(live_now) + len(sched_today)
+        len(live_now) + len(sched_today)
         if live_now or sched_today:
             n_leagues = len({m["league"] for m in live_now + sched_today})
             print(f"    ✅ {len(live_now)} live + {len(sched_today)} scheduled across {n_leagues} competitions")
@@ -1006,6 +1006,7 @@ def run(cricket=True, football=True, multi=True):
         )
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         print(f"  ⚠️ Outcome tracking: {e}")
         R["_audit"]["D_tracking"] = f"⚠️ {e}"

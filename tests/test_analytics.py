@@ -410,6 +410,10 @@ class TestSHAPExplainer:
         assert result["method"] == "sklearn_importance_fallback"
         assert len(result["top_for_a"]) > 0
 
+    @pytest.mark.skipif(
+        not getattr(__import__("analytics"), "HAS_SHAP", False),
+        reason="shap not installed",
+    )
     def test_fit_and_global_with_shap(self):
         """Test SHAP fit with a real RandomForest."""
         from sklearn.ensemble import RandomForestClassifier
@@ -430,6 +434,10 @@ class TestSHAPExplainer:
         # Values should be non-negative (mean |SHAP|)
         assert all(v >= 0 for v in importance.values())
 
+    @pytest.mark.skipif(
+        not getattr(__import__("analytics"), "HAS_SHAP", False),
+        reason="shap not installed",
+    )
     def test_explain_prediction_with_shap(self):
         """Test per-prediction SHAP explanation."""
         from sklearn.ensemble import RandomForestClassifier
